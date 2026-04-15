@@ -69,6 +69,10 @@ image = (
     # Main dependency: causality fork of stable-worldmodel (pulls stable-pretraining too)
     .pip_install(
         "stable-worldmodel[train,env] @ git+https://github.com/epokhcs/stable-worldmodel.git@causality",
+        # Pin stable-pretraining to the version used locally. Newer versions have a
+        # bug where Resize.__call__ references self.transform but the attribute was
+        # renamed to _transform, causing AttributeError during data loading.
+        "stable-pretraining==0.1.6",
         # stable-pretraining's loose constraint resolves to datasets==1.1.1 which
         # lacks the `datasets.config` submodule required at import time. Pin >=2.0.
         "datasets>=2.0",
