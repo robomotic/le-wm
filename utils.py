@@ -1,8 +1,24 @@
+import os
 import numpy as np
 import torch
 from pathlib import Path
 from stable_pretraining import data as dt
 from lightning.pytorch.callbacks import Callback
+
+
+def get_stablewm_home() -> Path:
+    """Return the stable-worldmodel cache directory.
+
+    Respects $STABLEWM_HOME if set, otherwise falls back to ~/.stable-wm/.
+    Creates the directory if it does not exist.
+    """
+    try:
+        from stable_worldmodel.data.utils import get_cache_dir
+        return Path(get_cache_dir())
+    except Exception:
+        path = Path(os.environ.get("STABLEWM_HOME", Path.home() / ".stable-wm"))
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
 def get_img_preprocessor(source: str, target: str, img_size: int = 224):
     imagenet_stats = dt.dataset_stats.ImageNet

@@ -27,29 +27,52 @@ If you find this code useful, please reference it in your paper:
 ```
 
 ## Using the code
-This codebase builds on [stable-worldmodel](https://github.com/galilai-group/stable-worldmodel) for environment management, planning, and evaluation, and [stable-pretraining](https://github.com/galilai-group/stable-pretraining) for training. Together they reduce this repository to its core contribution: the model architecture and training objective.
+This codebase builds on a fork of [stable-worldmodel](https://github.com/epokhcs/stable-worldmodel/tree/causality) (the `causality` branch) for environment management, planning, and evaluation, and [stable-pretraining](https://github.com/galilai-group/stable-pretraining) for training. Together they reduce this repository to its core contribution: the model architecture and training objective. The fork adds the **Glitched Hue Rooms** environment.
 
 **Installation:**
 ```bash
 uv venv --python=3.10
 source .venv/bin/activate
-uv pip install stable-worldmodel[train,env]
+uv pip install "stable-worldmodel[train,env] @ git+https://github.com/epokhcs/stable-worldmodel.git@causality"
 ```
 
 ## Data
 
-Datasets use the HDF5 format for fast loading. Download the data from the [Drive](https://drive.google.com/drive/folders/1r31os0d4-rR0mdHc7OlY_e5nh3XT4r4e?usp=sharing) and decompress with:
-
-```bash
-tar --zstd -xvf archive.tar.zst
-```
-
-Place the extracted `.h5` files under `$STABLEWM_HOME` (defaults to `~/.stable-wm/`). You can override this path:
+Datasets use the HDF5 format for fast loading. All datasets live under `$STABLEWM_HOME` (defaults to `~/.stable-wm/`). You can override this path:
 ```bash
 export STABLEWM_HOME=/path/to/your/storage
 ```
 
 Dataset names are specified without the `.h5` extension. For example, `config/train/data/pusht.yaml` references `pusht_expert_train`, which resolves to `$STABLEWM_HOME/pusht_expert_train.h5`.
+
+### pusht / cube / reacher / two-room
+
+Download from the [Google Drive](https://drive.google.com/drive/folders/1r31os0d4-rR0mdHc7OlY_e5nh3XT4r4e?usp=sharing) and decompress:
+
+```bash
+tar --zstd -xvf archive.tar.zst
+# then move the .h5 files to $STABLEWM_HOME
+```
+
+### Glitched Hue Two Room
+
+Download directly from Hugging Face with the provided script:
+
+```bash
+python scripts/download_dataset.py
+```
+
+This downloads `glitched_hue_tworoom_half.h5` from [`robomotic/causality-two-room-modal`](https://huggingface.co/datasets/robomotic/causality-two-room-modal) into `$STABLEWM_HOME`. The `_half` suffix identifies the action-noise variant of the dataset.
+
+To download to a different directory:
+```bash
+python scripts/download_dataset.py --dest /path/to/storage
+```
+
+Requires `huggingface_hub`:
+```bash
+pip install huggingface_hub
+```
 
 ## Training
 

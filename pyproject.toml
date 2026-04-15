@@ -1,0 +1,27 @@
+[project]
+name = "le-wm"
+version = "0.1.0"
+description = "LeWorldModel: Stable End-to-End JEPA from Pixels"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    # Fork of stable-worldmodel with GlitchedHueTwoRoom environment
+    "stable-worldmodel[train,env] @ git+https://github.com/epokhcs/stable-worldmodel.git@causality",
+    # Needed by scripts/download_dataset.py
+    "huggingface_hub>=1.0",
+    # Needed by modaldotcom/app.py
+    "modal>=0.73",
+    # Override: stable-pretraining's loose constraint resolves to 1.1.1 which
+    # lacks the `datasets.config` submodule; 2.0+ is required.
+    "datasets>=2.0",
+]
+
+[tool.uv.sources]
+stable-worldmodel = { git = "https://github.com/epokhcs/stable-worldmodel.git", branch = "causality" }
+
+[tool.uv]
+# Keep datasets at a version that has the config submodule (introduced in 1.6,
+# fully stable from 2.0). stable-pretraining's loose constraint resolves to
+# 1.1.1 which lacks it.
+override-dependencies = [
+    "datasets>=2.0",
+]
