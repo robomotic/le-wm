@@ -72,14 +72,22 @@ image = (
         # stable-pretraining's loose constraint resolves to datasets==1.1.1 which
         # lacks the `datasets.config` submodule required at import time. Pin >=2.0.
         "datasets>=2.0",
-        # Pin lightning to 2.6.1 (matches local venv). Newer Lightning returns the
-        # optimizer directly from self.optimizers() when there is only one, whereas
-        # stable_pretraining/module.py calls len() on the result, which raises
-        # TypeError. 2.6.1 still returns a list in all cases.
-        "lightning==2.6.1",
-        "pytorch-lightning==2.6.1",
         "wandb",
         "huggingface_hub",
+    )
+    # Patch stable_pretraining/module.py for Lightning 2.x compatibility.
+    # Lightning 2.0+ returns a single optimizer (not a list) from self.optimizers()
+    # when there is only one, but stable_pretraining.Module.on_train_start calls
+    # len() on the result, raising TypeError. Wrap to always be a list.
+    .run_commands(
+        "python3 -c '"
+        "import pathlib; "
+        "p = pathlib.Path(\"/usr/local/lib/python3.10/site-packages/stable_pretraining/module.py\"); "
+        "src = p.read_text(); "
+        "old = \"optimizers = self.optimizers()\"; "
+        "new = \"optimizers = self.optimizers(); optimizers = optimizers if isinstance(optimizers, list) else [optimizers]\"; "
+        "p.write_text(src.replace(old, new, 1)); "
+        "print(\"Patched stable_pretraining/module.py\")'"
     )
     # Copy the local le-wm repo (train.py, eval.py, jepa.py, module.py,
     # utils.py, config/) into the container image at build time.
