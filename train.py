@@ -14,6 +14,21 @@ from jepa import JEPA
 from module import ARPredictor, Embedder, MLP, SIGReg
 from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
 
+# ---------------------------------------------------------------------------
+# Lightning 2.x compatibility: self.optimizers() returns a single optimizer
+# (not a list) when there is only one. stable_pretraining.Module.on_train_start
+# calls len() on the result, raising TypeError. Patch the base class method
+# globally so it always returns a list.
+# ---------------------------------------------------------------------------
+_orig_optimizers = pl.LightningModule.optimizers
+
+def _optimizers_as_list(self, use_pl_optimizer: bool = True):
+    result = _orig_optimizers(self, use_pl_optimizer)
+    return result if isinstance(result, list) else [result]
+
+pl.LightningModule.optimizers = _optimizers_as_list
+# ---------------------------------------------------------------------------
+
 
 def lejepa_forward(self, batch, stage, cfg):
     """encode observations, predict next states, compute losses."""

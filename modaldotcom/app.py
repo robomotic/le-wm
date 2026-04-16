@@ -75,20 +75,6 @@ image = (
         "wandb",
         "huggingface_hub",
     )
-    # Patch stable_pretraining/module.py for Lightning 2.x compatibility.
-    # Lightning 2.0+ returns a single optimizer (not a list) from self.optimizers()
-    # when there is only one, but stable_pretraining.Module.on_train_start calls
-    # len() on the result, raising TypeError. Wrap to always be a list.
-    .run_commands(
-        "python3 -c '"
-        "import pathlib; "
-        "p = pathlib.Path(\"/usr/local/lib/python3.10/site-packages/stable_pretraining/module.py\"); "
-        "src = p.read_text(); "
-        "old = \"optimizers = self.optimizers()\"; "
-        "new = \"optimizers = self.optimizers(); optimizers = optimizers if isinstance(optimizers, list) else [optimizers]\"; "
-        "p.write_text(src.replace(old, new, 1)); "
-        "print(\"Patched stable_pretraining/module.py\")'"
-    )
     # Copy the local le-wm repo (train.py, eval.py, jepa.py, module.py,
     # utils.py, config/) into the container image at build time.
     .add_local_dir(
