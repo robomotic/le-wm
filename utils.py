@@ -3,6 +3,7 @@ import numpy as np
 import torch
 from pathlib import Path
 from stable_pretraining import data as dt
+from torchvision.transforms import v2 as tv_transforms
 from lightning.pytorch.callbacks import Callback
 
 
@@ -23,7 +24,14 @@ def get_stablewm_home() -> Path:
 def get_img_preprocessor(source: str, target: str, img_size: int = 224):
     imagenet_stats = dt.dataset_stats.ImageNet
     to_image = dt.transforms.ToImage(**imagenet_stats, source=source, target=target)
-    resize = dt.transforms.Resize(img_size, source=source, target=target)
+    # Avoid stable_pretraining.Resize which has a broken __call__ (references
+    # self.transform but the attribute is stored as self._transform). Use
+    # WrapTorchTransform + torchvision directly — same pattern as get_column_normalizer.
+    resize = dt.transforms.WrapTorchTransform(
+        tv_transforms.Resize(img_size, antialias=True),
+        source=source,
+        target=target,
+    )
     return dt.transforms.Compose(to_image, resize)
 
 
