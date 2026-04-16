@@ -29,6 +29,9 @@ def _optimizers_as_list(self, use_pl_optimizer: bool = True):
 pl.LightningModule.optimizers = _optimizers_as_list
 # ---------------------------------------------------------------------------
 
+# Use Tensor Core matmul on Ampere+ GPUs (A10, A100, H100) for free throughput.
+torch.set_float32_matmul_precision("high")
+
 
 def lejepa_forward(self, batch, stage, cfg):
     """encode observations, predict next states, compute losses."""
