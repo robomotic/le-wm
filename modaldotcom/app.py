@@ -72,6 +72,12 @@ image = (
         # stable-pretraining's loose constraint resolves to datasets==1.1.1 which
         # lacks the `datasets.config` submodule required at import time. Pin >=2.0.
         "datasets>=2.0",
+        # Pin lightning to 2.6.1 (matches local venv). Newer Lightning returns the
+        # optimizer directly from self.optimizers() when there is only one, whereas
+        # stable_pretraining/module.py calls len() on the result, which raises
+        # TypeError. 2.6.1 still returns a list in all cases.
+        "lightning==2.6.1",
+        "pytorch-lightning==2.6.1",
         "wandb",
         "huggingface_hub",
     )
