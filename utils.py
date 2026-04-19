@@ -49,6 +49,30 @@ def get_column_normalizer(dataset, source: str, target: str):
     normalizer = dt.transforms.WrapTorchTransform(norm_fn, source=source, target=target)
     return normalizer
 
+class ModalVolumeCommitCallback(Callback):
+    """Commit the Modal volume every N epochs so checkpoints survive container crashes.
+
+    Reads the volume name from the MODAL_VOLUME_NAME env var; silently skips when
+    not running inside Modal (env var absent or modal package unavailable).
+    """
+
+    def __init__(self, commit_every_n_epochs: int = 10):
+        self.volume_name = os.environ.get("MODAL_VOLUME_NAME", "")
+        self.commit_every_n_epochs = commit_every_n_epochs
+
+    def on_train_epoch_end(self, trainer, pl_module):
+        if not self.volume_name:
+            return
+        if (trainer.current_epoch + 1) % self.commit_every_n_epochs != 0:
+            return
+        try:
+            import modal
+            modal.Volume.from_name(self.volume_name).commit()
+            print(f"[ModalVolumeCommitCallback] volume '{self.volume_name}' committed at epoch {trainer.current_epoch + 1}")
+        except Exception as e:
+            print(f"[ModalVolumeCommitCallback] warning: could not commit volume: {e}")
+
+
 class ModelObjectCallBack(Callback):
     """Callback to pickle model object after each epoch."""
 

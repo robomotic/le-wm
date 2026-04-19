@@ -74,6 +74,7 @@ image = (
         "datasets>=2.0",
         "wandb",
         "huggingface_hub",
+        "scikit-learn",
     )
     # Copy the local le-wm repo (train.py, eval.py, jepa.py, module.py,
     # utils.py, config/) into the container image at build time.
@@ -100,6 +101,7 @@ image = (
 ENV = {
     "STABLEWM_HOME": CACHE_DIR,
     "MUJOCO_GL": "egl",   # headless OpenGL for eval environments
+    "MODAL_VOLUME_NAME": "swm-cache",
 }
 
 # ---------------------------------------------------------------------------

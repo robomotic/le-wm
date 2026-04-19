@@ -12,7 +12,7 @@ from omegaconf import OmegaConf, open_dict
 
 from jepa import JEPA
 from module import ARPredictor, Embedder, MLP, SIGReg
-from utils import get_column_normalizer, get_img_preprocessor, ModelObjectCallBack
+from utils import get_column_normalizer, get_img_preprocessor, ModalVolumeCommitCallback, ModelObjectCallBack
 
 # ---------------------------------------------------------------------------
 # Lightning 2.x compatibility: self.optimizers() returns a single optimizer
@@ -177,10 +177,11 @@ def run(cfg):
     object_dump_callback = ModelObjectCallBack(
         dirpath=run_dir, filename=cfg.output_model_name, epoch_interval=1,
     )
+    modal_commit_callback = ModalVolumeCommitCallback(commit_every_n_epochs=10)
 
     trainer = pl.Trainer(
         **cfg.trainer,
-        callbacks=[object_dump_callback],
+        callbacks=[object_dump_callback, modal_commit_callback],
         num_sanity_val_steps=1,
         logger=logger,
         enable_checkpointing=True,

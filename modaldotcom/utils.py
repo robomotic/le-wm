@@ -21,9 +21,19 @@ VOLUME_NAME = "swm-cache"
 
 
 def list_ckpts(vol: modal.Volume) -> list[str]:
-    """Return names of all .ckpt files at the volume root."""
-    entries = vol.listdir("/")
-    return [e.path for e in entries if e.path.endswith(".ckpt")]
+    """Return paths of all .ckpt and config.yaml files in the volume (recursive)."""
+    results: list[str] = []
+    _collect(vol, "/", results)
+    return results
+
+
+def _collect(vol: modal.Volume, path: str, out: list[str]) -> None:
+    for entry in vol.listdir(path):
+        # entry.type: FileEntryType.DIRECTORY == 2, FILE == 1
+        if entry.type.value == 2:
+            _collect(vol, entry.path, out)
+        elif entry.path.endswith(".ckpt") or entry.path.endswith("config.yaml"):
+            out.append(entry.path)
 
 
 def clean_ckpts(dry_run: bool = False, yes: bool = False) -> None:
