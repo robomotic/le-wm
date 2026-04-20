@@ -50,6 +50,11 @@ modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb  # smoke test
 modal run modaldotcom/app.py --do-eval --policy <job_id>/lewm_epoch_100
 ```
 
+To force a Modal image rebuild without breaking the cache for subsequent builds:
+```bash
+MODAL_IGNORE_CACHE=1 modal run modaldotcom/app.py --do-train  # or --do-eval
+```
+
 ## Architecture
 
 The pipeline flows: raw pixels → ViT encoder → projector → latent embeddings → autoregressive predictor → predicted next embeddings. Actions are embedded via Conv1d + MLP and injected into the predictor via AdaLN-zero conditioning.

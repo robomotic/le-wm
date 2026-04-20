@@ -46,6 +46,16 @@ def get_dataset(cfg, dataset_name):
     )
     return dataset
 
+
+def _write_breakdown(f, label, episode_successes, mask):
+    n = int(mask.sum())
+    if n == 0:
+        f.write(f"  {label}: n/a (0 samples)\n")
+        return
+    k = int(episode_successes[mask].sum())
+    f.write(f"  {label}: {k}/{n} ({100. * k / n:.1f}%)\n")
+
+
 @hydra.main(version_base=None, config_path="./config/eval", config_name="pusht")
 def run(cfg: DictConfig):
     """Run evaluation of dinowm vs random policy."""
@@ -109,7 +119,7 @@ def run(cfg: DictConfig):
     episode_len = get_episodes_length(dataset, ep_indices)
     max_start_idx = episode_len - cfg.eval.goal_offset_steps - 1
     max_start_idx_dict = {ep_id: max_start_idx[i] for i, ep_id in enumerate(ep_indices)}
-    # Map each dataset row’s episode_idx to its max_start_idx
+    # Map each dataset row's episode_idx to its max_start_idx
     col_name = "episode_idx" if "episode_idx" in dataset.column_names else "ep_idx"
     max_start_per_row = np.array(
         [max_start_idx_dict[ep_id] for ep_id in dataset.get_col_data(col_name)]
@@ -138,6 +148,21 @@ def run(cfg: DictConfig):
 
     world.set_policy(policy)
 
+    # Patch world.step to accumulate per-episode teleport usage during the rollout.
+    # episode_successes[i] aligns with random_episode_indices[i] (same env ordering).
+    num_envs = len(eval_episodes)
+    teleported_any = np.zeros(num_envs, dtype=bool)
+    _orig_step = world.step
+
+    def _tracking_step():
+        _orig_step()
+        tp = world.infos.get('teleported')
+        if tp is not None:
+            tp_arr = np.asarray(tp, dtype=bool).reshape(num_envs, -1)
+            teleported_any[:] |= tp_arr.any(axis=1)
+
+    world.step = _tracking_step
+
     start_time = time.time()
     metrics = world.evaluate_from_dataset(
         dataset,
@@ -149,7 +174,9 @@ def run(cfg: DictConfig):
         video_path=results_path,
     )
     end_time = time.time()
-    
+
+    world.step = _orig_step
+
     print(metrics)
 
     results_path = results_path / cfg.output.filename
@@ -164,6 +191,75 @@ def run(cfg: DictConfig):
 
         f.write("==== RESULTS ====\n")
         f.write(f"metrics: {metrics}\n")
+        f.write(f"evaluation_time: {end_time - start_time} seconds\n")
+
+    # --- breakdown file ---
+    episode_successes = np.asarray(metrics['episode_successes'], dtype=bool)
+    row_data = dataset.get_row_data(random_episode_indices)
+
+    def _col(key):
+        v = row_data.get(key)
+        return np.asarray(v) if v is not None else None
+
+    bg_colors   = _col('variation.background.color')   # (N,3) uint8
+    teleport_en = _col('variation.teleport.enabled')   # (N,)  int
+    agent_pos   = _col('variation.agent.position')     # (N,2) float
+    target_pos  = _col('variation.target.position')    # (N,2) float
+    wall_axes   = _col('variation.wall.axis')          # (N,)  int  (may be absent)
+
+    stem = Path(cfg.output.filename).stem
+    suffix = Path(cfg.output.filename).suffix
+    breakdown_path = results_path.parent / f"{stem}_breakdown{suffix}"
+
+    with breakdown_path.open("a") as f:
+        f.write("\n")
+
+        f.write("==== CONFIG ====\n")
+        f.write(OmegaConf.to_yaml(cfg))
+        f.write("\n")
+
+        f.write("==== BREAKDOWN ====\n")
+
+        # overall
+        _write_breakdown(f, "overall", episode_successes, np.ones(num_envs, dtype=bool))
+
+        # by hue (dominant green vs blue channel in background color)
+        f.write("-- by hue --\n")
+        if bg_colors is not None:
+            green_mask = np.all(bg_colors == [  0, 180,   0], axis=1)
+            blue_mask  = np.all(bg_colors == [  0,   0, 255], axis=1)
+            _write_breakdown(f, "green", episode_successes, green_mask)
+            _write_breakdown(f, "blue",  episode_successes, blue_mask)
+        else:
+            f.write("  # variation.background.color not in dataset\n")
+
+        # by teleport pixel present/absent
+        f.write("-- teleport pixel --\n")
+        if teleport_en is not None:
+            _write_breakdown(f, "absent",  episode_successes, teleport_en == 0)
+            _write_breakdown(f, "present", episode_successes, teleport_en == 1)
+        else:
+            f.write("  # variation.teleport.enabled not in dataset\n")
+
+        # by door crossing required (agent and goal on different sides of the wall)
+        f.write("-- door crossing --\n")
+        if agent_pos is not None and target_pos is not None:
+            # wall.axis=1 → vertical wall, compare x (dim 0); axis=0 → horizontal, compare y (dim 1)
+            axes = wall_axes if wall_axes is not None else np.ones(num_envs, dtype=int)
+            dims = np.where(np.asarray(axes) == 1, 0, 1)
+            a_coord = agent_pos[np.arange(num_envs), dims]
+            g_coord = target_pos[np.arange(num_envs), dims]
+            cross_needed = (a_coord - 112.0) * (g_coord - 112.0) < 0
+            _write_breakdown(f, "same room",         episode_successes, ~cross_needed)
+            _write_breakdown(f, "crossing required", episode_successes,  cross_needed)
+        else:
+            f.write("  # variation.agent/target.position not in dataset\n")
+
+        # by teleport pixel actually used during rollout
+        f.write("-- teleport used --\n")
+        _write_breakdown(f, "not used", episode_successes, ~teleported_any)
+        _write_breakdown(f, "used",     episode_successes,  teleported_any)
+
         f.write(f"evaluation_time: {end_time - start_time} seconds\n")
 
 
