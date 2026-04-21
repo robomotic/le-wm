@@ -163,6 +163,80 @@ def train(
 
 
 # ---------------------------------------------------------------------------
+# Stats function  (no GPU — pure WandB API query)
+# ---------------------------------------------------------------------------
+
+WANDB_ENTITY  = "paoloai-robomotic"
+WANDB_PROJECT = "lewm-causality"
+
+@app.function(
+    image=image,
+    secrets=[wandb_secret],
+    timeout=120,
+)
+def stats(run_id: str = "") -> None:
+    """Print key training stats from WandB for a finished (or crashed) run.
+
+    Args:
+        run_id: WandB run ID (the Hydra job subdir printed at training start).
+                Leave blank to use the most recent run in the project.
+    """
+    import wandb
+
+    api = wandb.Api()
+
+    if run_id:
+        run = api.run(f"{WANDB_ENTITY}/{WANDB_PROJECT}/{run_id}")
+    else:
+        runs = api.runs(
+            f"{WANDB_ENTITY}/{WANDB_PROJECT}",
+            order="-created_at",
+            per_page=1,
+        )
+        run = next(iter(runs))
+
+    print(f"\n{'='*60}")
+    print(f"Run      : {run.id}  ({run.name})")
+    print(f"State    : {run.state}")
+    print(f"Epochs   : {int(run.summary.get('trainer/global_step', 0))} steps  |  "
+          f"last epoch logged: {int(run.summary.get('epoch', -1)) + 1}")
+    print(f"Runtime  : {run.summary.get('_runtime', 0) / 3600:.2f} h")
+    print(f"{'='*60}")
+
+    # Loss keys as logged by Lightning via stable-pretraining (fit/validate prefixes)
+    summary = dict(run.summary)
+    loss_items = {k: v for k, v in summary.items()
+                  if "loss" in k.lower() and isinstance(v, (int, float))}
+
+    print("Last-epoch losses:")
+    if loss_items:
+        for k, v in sorted(loss_items.items()):
+            print(f"  {k:<40} {v:.6f}")
+    else:
+        print("  (no loss keys found — dumping all numeric summary keys)")
+        for k, v in sorted(summary.items()):
+            if isinstance(v, (int, float)) and not k.startswith("_"):
+                print(f"  {k:<40} {v}")
+
+    # Best val loss epoch from full history
+    for val_key in ("validate/loss_epoch", "val/loss", "val/loss_epoch"):
+        try:
+            hist = run.history(keys=[val_key, "epoch"], pandas=True)
+            if not hist.empty and val_key in hist.columns:
+                best_row = hist.dropna(subset=[val_key]).loc[
+                    lambda df: df[val_key].idxmin()
+                ]
+                print(f"\nBest {val_key} : {best_row[val_key]:.6f}  "
+                      f"at epoch {int(best_row.get('epoch', -1)) + 1}")
+                break
+        except Exception:
+            pass
+
+    print(f"\nWandB URL: https://wandb.ai/{WANDB_ENTITY}/{WANDB_PROJECT}/runs/{run.id}")
+    print(f"{'='*60}\n")
+
+
+# ---------------------------------------------------------------------------
 # Evaluation function
 # ---------------------------------------------------------------------------
 
@@ -207,10 +281,12 @@ def evaluate(
 def main(
     do_train: bool = False,
     do_eval: bool = False,
+    do_stats: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
     config_name: str = "glitched_hue_tworoom",
+    run_id: str = "",
     no_wandb: bool = False,
 ) -> None:
     """Orchestrate training and/or evaluation on Modal.
@@ -225,9 +301,15 @@ def main(
 
     # Evaluation with a known checkpoint
     modal run modaldotcom/app.py --do-eval --policy 2024-01-01/0/lewm_epoch_100
+
+    # Stats for the most recent WandB run
+    modal run modaldotcom/app.py --do-stats
+
+    # Stats for a specific run
+    modal run modaldotcom/app.py --do-stats --run-id 80aovwgh
     """
-    if not do_train and not do_eval:
-        print("Nothing to do. Pass --do-train and/or --do-eval.")
+    if not do_train and not do_eval and not do_stats:
+        print("Nothing to do. Pass --do-train, --do-eval, and/or --do-stats.")
         return
 
     policy_path = policy
@@ -247,3 +329,6 @@ def main(
             print("  modal run modaldotcom/app.py --do-eval --policy <job_id>/lewm_epoch_100")
             return
         evaluate.remote(policy=policy, config_name=config_name)
+
+    if do_stats:
+        stats.remote(run_id=run_id)
