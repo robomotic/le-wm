@@ -198,8 +198,19 @@ def inspect_dataset(name: str = "glitched_hue_tworoom_half") -> None:
     import h5py
     import numpy as np
 
+    volume.reload()
+
     path = f"{CACHE_DIR}/{name}.h5"
     print(f"\nInspecting: {path}\n{'='*60}")
+
+    import os
+    print(f"Exists : {os.path.exists(path)}")
+    if os.path.exists(path):
+        print(f"Size   : {os.path.getsize(path):,} bytes")
+        with open(path, "rb") as fraw:
+            magic = fraw.read(8)
+        print(f"Magic  : {magic.hex()}  (HDF5 should start with 894844460d0a1a0a)")
+        print(f"is_hdf5: {h5py.is_hdf5(path)}")
 
     with h5py.File(path, "r") as f:
         ep_len = f["ep_len"][:]
@@ -244,7 +255,8 @@ def collect_optionc(n_episodes: int = 5000, seed: int = 42) -> str:
     """Collect the Option C reversed-confound dataset on a cloud CPU worker.
 
     Runs two fixed-option passes (blue/disabled + green/enabled) via
-    World.record_dataset(), then merges them into one HDF5 file.
+    World.record_dataset(), then merges them into one HDF5 file using
+    chunked I/O to avoid loading all pixels into RAM at once.
 
     Args:
         n_episodes: Total episodes (split 50/50 between the two conditions).
@@ -264,6 +276,30 @@ def collect_optionc(n_episodes: int = 5000, seed: int = 42) -> str:
     volume.commit()
     out = f"{CACHE_DIR}/glitched_hue_optionc.h5"
     print(f"\n✅ Dataset written to volume: {out}")
+    return out
+
+
+@app.function(
+    image=image,
+    volumes={CACHE_DIR: volume},
+    env=ENV,
+    timeout=3600,   # merge of two 3 GB files should finish in < 1 h
+    memory=16384,   # 16 GB — chunked I/O keeps peak RAM low but give headroom
+)
+def remerge_optionc() -> str:
+    """Re-run the merge step from existing half-files (skips collection).
+
+    Use this when the half-files (_blue.h5 / _green.h5) are already on the
+    volume but the merged glitched_hue_optionc.h5 is corrupt or missing.
+    """
+    import subprocess
+    volume.reload()
+    cmd = ["python", "research/collect_option_c.py", "--only-merge"]
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd="/workspace")
+    volume.commit()
+    out = f"{CACHE_DIR}/glitched_hue_optionc.h5"
+    print(f"\n✅ Merged dataset on volume: {out}")
     return out
 
 
@@ -453,6 +489,7 @@ def main(
     do_causal_test: bool = False,
     do_inspect: bool = False,
     do_collect_optionc: bool = False,
+    do_remerge_optionc: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
@@ -503,7 +540,7 @@ def main(
     # Stats for a specific run
     modal run modaldotcom/app.py --do-stats --run-id 80aovwgh
     """
-    if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect, do_collect_optionc]):
+    if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect, do_collect_optionc, do_remerge_optionc]):
         print("Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, --do-inspect, and/or --do-collect-optionc.")
         return
 
@@ -532,6 +569,10 @@ def main(
     if do_collect_optionc:
         out = collect_optionc.remote(n_episodes=optionc_episodes)
         print(f"Option C dataset on volume: {out}")
+
+    if do_remerge_optionc:
+        out = remerge_optionc.remote()
+        print(f"Option C merged dataset on volume: {out}")
 
     if do_causal_test:
         if not policy:
