@@ -82,8 +82,10 @@ image = (
         "huggingface_hub",
         "scikit-learn",
         "matplotlib",
-        "hdf5plugin",   # HDF5 compression plugins (LZ4, blosc, zstd…) needed to read swm datasets
     )
+    # HDF5 compression plugins (LZ4, blosc, zstd…) — separate layer so it doesn't
+    # invalidate the stable-worldmodel cache when hdf5plugin version changes.
+    .pip_install("hdf5plugin")
     # Copy the local le-wm repo (train.py, eval.py, jepa.py, module.py,
     # utils.py, config/) into the container image at build time.
     .add_local_dir(
