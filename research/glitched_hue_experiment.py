@@ -653,38 +653,42 @@ def _plot_latent_pca(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir
     else:
         zf2d = zc2d = np.empty((0, 2))
 
-    fig, ax = plt.subplots(figsize=(3.5, 3.0))
+    fig, ax = plt.subplots(figsize=(3.5, 3.2))
 
     for label, colour, name in [
         (0, _C["blue"],  "Blue room"),
         (1, _C["green"], "Green room"),
     ]:
         m = (hue_label == label) & ~tp_flag
-        ax.scatter(z2d[m, 0], z2d[m, 1], c=colour, s=4, alpha=0.22,
+        ax.scatter(z2d[m, 0], z2d[m, 1], c=colour, s=4, alpha=0.18,
                    linewidths=0, label=name)
 
     if tp_flag.any():
         ax.scatter(z2d[tp_flag, 0], z2d[tp_flag, 1],
-                   marker="*", s=50, c=_C["tp"], zorder=5,
-                   linewidths=0.3, edgecolors="white", label="Teleport frame")
+                   marker="*", s=40, c=_C["tp"], zorder=5,
+                   linewidths=0, label="Teleport frame")
 
     for i in range(len(zf2d)):
         ax.annotate(
             "", xy=(zc2d[i, 0], zc2d[i, 1]), xytext=(zf2d[i, 0], zf2d[i, 1]),
             arrowprops=dict(arrowstyle="-|>", color=_C["purple"],
-                            lw=0.9, mutation_scale=6),
+                            lw=0.8, mutation_scale=5),
         )
     if len(zf2d):
-        ax.scatter(zf2d[:, 0], zf2d[:, 1], c=_C["purple"], s=25,
+        ax.scatter(zf2d[:, 0], zf2d[:, 1], c=_C["purple"], s=18,
                    zorder=6, label=r"$z_\mathrm{fact}$")
-        ax.scatter(zc2d[:, 0], zc2d[:, 1], c=_C["orange"], s=25,
-                   marker="D", zorder=6, label=r"$z_\mathrm{cf}$")
+        ax.scatter(zc2d[:, 0], zc2d[:, 1], c=_C["orange"], s=18,
+                   marker="D", zorder=6, label=r"$z_\mathrm{cf}$ (hue intervention)")
 
     var0 = pca.explained_variance_ratio_[0] * 100
     var1 = pca.explained_variance_ratio_[1] * 100
     ax.set_xlabel(f"PC1 ({var0:.1f}% var.)")
     ax.set_ylabel(f"PC2 ({var1:.1f}% var.)")
-    ax.legend(loc="upper left", markerscale=2.0, handletextpad=0.4)
+    ax.legend(
+        loc="upper center", bbox_to_anchor=(0.5, -0.16),
+        ncol=2, fontsize=6.5, markerscale=1.5,
+        frameon=False, handletextpad=0.3, columnspacing=0.8, labelspacing=0.3,
+    )
     _despine(ax)
 
     _save_fig(fig, out_dir, f"latent_pca{suffix}")
