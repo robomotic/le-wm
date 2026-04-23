@@ -198,8 +198,8 @@ def main():
 
     print("\n[5/5] Saving plots ...")
     _save_plots(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir, suffix)
-    print(f"Plots    → {out_dir}/surprise_over_time{suffix}.png")
-    print(f"         → {out_dir}/latent_pca{suffix}.png")
+    print(f"Plots    → {out_dir}/surprise_over_time{suffix}.pdf / .png")
+    print(f"         → {out_dir}/latent_pca{suffix}.pdf / .png")
 
     if not args.no_wandb:
         _log_to_wandb(metrics, args.ckpt_path, out_dir, suffix)
@@ -538,127 +538,156 @@ def _aap_consistency_advantage(jepa, loader, n_warmup=20, n_eval=50,
 # Stage 5 — Visualisation
 # ---------------------------------------------------------------------------
 
+# Publication-quality colour palette (ColorBrewer-safe, print-friendly)
+_C = {
+    "blue":   "#2166ac",
+    "green":  "#4dac26",
+    "red":    "#d6604d",
+    "purple": "#762a83",
+    "orange": "#e08214",
+    "tp":     "#b2182b",
+}
+
+
+def _setup_pub_style():
+    """Apply IEEE/NeurIPS-compatible rcParams: serif font, 9 pt, 300 dpi."""
+    plt.rcParams.update({
+        "font.family":         "serif",
+        "font.size":           9,
+        "axes.titlesize":      9,
+        "axes.labelsize":      9,
+        "xtick.labelsize":     8,
+        "ytick.labelsize":     8,
+        "legend.fontsize":     7.5,
+        "legend.framealpha":   0.85,
+        "legend.edgecolor":    "0.75",
+        "legend.handlelength": 1.8,
+        "lines.linewidth":     1.4,
+        "axes.linewidth":      0.7,
+        "xtick.major.width":   0.7,
+        "ytick.major.width":   0.7,
+        "xtick.major.size":    3.0,
+        "ytick.major.size":    3.0,
+        "figure.dpi":          150,
+        "savefig.dpi":         300,
+        "savefig.bbox":        "tight",
+        "savefig.pad_inches":  0.03,
+    })
+
+
+def _despine(ax):
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+
+def _save_fig(fig, out_dir, stem):
+    """Save figure as both PDF (for LaTeX inclusion) and PNG (preview)."""
+    fig.savefig(out_dir / f"{stem}.pdf")
+    fig.savefig(out_dir / f"{stem}.png")
+    plt.close(fig)
+
+
 def _save_plots(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir, suffix=""):
+    _setup_pub_style()
     _plot_surprise_over_time(aap_results, out_dir, suffix)
     _plot_latent_pca(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir, suffix)
 
 
 def _plot_surprise_over_time(aap_results, out_dir, suffix=""):
-    """Per-step factual vs counterfactual surprise, averaged over AAP episodes.
-
-    The X-axis is the prediction step within the context window (step 0 means
-    "predict frame 1 from frame 0 alone", etc.).  A spike in the orange
-    (counterfactual) line at the teleport step indicates the model relied on
-    background hue to predict the teleport — Ladder 2 behaviour.  Overlapping
-    lines indicate the model learned the true mechanism — Ladder 3.
-    """
+    """Per-step factual vs counterfactual surprise, averaged over AAP episodes."""
     if not aap_results:
         return
 
     n_steps  = len(aap_results[0]["surp_fact_steps"])
-    fact_mat = np.array([r["surp_fact_steps"] for r in aap_results])   # (N, S)
+    fact_mat = np.array([r["surp_fact_steps"] for r in aap_results])
     cf_mat   = np.array([r["surp_cf_steps"]   for r in aap_results])
 
     mean_f,  std_f  = fact_mat.mean(0), fact_mat.std(0)
     mean_cf, std_cf = cf_mat.mean(0),   cf_mat.std(0)
     xs = np.arange(n_steps)
-
     t_tp = int(np.median([r["teleport_step"] for r in aap_results]))
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(xs, mean_f,  color="#1f77b4", lw=2,
-            label="Factual (blue room, teleport enabled)")
-    ax.fill_between(xs, mean_f - std_f, mean_f + std_f, alpha=0.2, color="#1f77b4")
-    ax.plot(xs, mean_cf, color="#ff7f0e", lw=2, linestyle="--",
-            label="Counterfactual (hue shifted → green)")
-    ax.fill_between(xs, mean_cf - std_cf, mean_cf + std_cf, alpha=0.2, color="#ff7f0e")
-    ax.axvline(t_tp, color="red", linestyle=":", lw=1.5, label=f"Teleport step (t={t_tp})")
-    ax.set_xlabel("Prediction step within window")
-    ax.set_ylabel("Prediction MSE (surprise)")
+    fig, ax = plt.subplots(figsize=(3.5, 2.4))
+
+    ax.plot(xs, mean_f,  color=_C["blue"],   lw=1.4,
+            label="Factual (blue room)")
+    ax.fill_between(xs, mean_f - std_f,  mean_f + std_f,
+                    alpha=0.18, color=_C["blue"], linewidth=0)
+
+    ax.plot(xs, mean_cf, color=_C["orange"], lw=1.4, linestyle="--",
+            label="Counterfactual (hue $\\to$ green)")
+    ax.fill_between(xs, mean_cf - std_cf, mean_cf + std_cf,
+                    alpha=0.18, color=_C["orange"], linewidth=0)
+
+    ax.axvline(t_tp, color=_C["tp"], linestyle=":", lw=1.0,
+               label=f"Teleport ($t={t_tp}$)")
+
+    ax.set_xlabel("Prediction step")
+    ax.set_ylabel("MSE (surprise)")
     ax.set_xticks(xs)
-    ax.set_title(
-        "Surprise at each step — factual vs counterfactual\n"
-        "Orange spike at teleport → Ladder 2 (model uses hue as shortcut)\n"
-        "Lines match → Ladder 3 (model learned true causal mechanism)"
-    )
-    ax.legend(fontsize=8)
-    plt.tight_layout()
-    fig.savefig(out_dir / f"surprise_over_time{suffix}.png", dpi=150)
-    plt.close(fig)
+    ax.legend(loc="upper right")
+    _despine(ax)
+
+    _save_fig(fig, out_dir, f"surprise_over_time{suffix}")
 
 
 def _plot_latent_pca(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir, suffix=""):
-    """2D PCA of latent embeddings.
+    """2D PCA of latent embeddings with hue-intervention arrows."""
+    n_bg = min(3000, len(z_all))
+    rng  = np.random.default_rng(0)
+    idx  = rng.choice(len(z_all), n_bg, replace=False)
+    z_bg, h_bg, d_bg = z_all[idx], hue_all[idx], max_deltas[idx]
 
-    Blue/green points: room condition of each encoded window.
-    Red stars: windows where a teleport event was detected (high pos-delta).
-    Purple arrows: hue intervention vectors z_fact → z_cf for AAP episodes.
-
-    Short, parallel arrows in a well-separated space indicate that the hue
-    dimension is locally isolated (ICM).  Long arrows cutting across the
-    teleport cluster indicate the model has entangled hue with the causal
-    signal (confounded).
-    """
-    # Subsample background points for speed
-    n_bg  = min(3000, len(z_all))
-    rng   = np.random.default_rng(0)
-    idx   = rng.choice(len(z_all), n_bg, replace=False)
-    z_bg  = z_all[idx]
-    h_bg  = hue_all[idx]
-    d_bg  = max_deltas[idx]
-
-    pca   = PCA(n_components=2, random_state=42)
+    pca = PCA(n_components=2, random_state=42)
     pca.fit(z_bg)
-    z2d   = pca.transform(z_bg)
+    z2d = pca.transform(z_bg)
 
     hue_label = (h_bg > 0).astype(int)
-    tp_flag   = d_bg > np.percentile(d_bg, 90)  # proxy teleport frames
+    tp_flag   = d_bg > np.percentile(d_bg, 90)
 
-    # Project AAP trajectories
     if aap_results:
-        z_fact_np = np.stack([r["z_fact"] for r in aap_results])  # (N, D)
+        z_fact_np = np.stack([r["z_fact"] for r in aap_results])
         z_cf_np   = np.stack([r["z_cf"]   for r in aap_results])
         zf2d      = pca.transform(z_fact_np)
         zc2d      = pca.transform(z_cf_np)
     else:
         zf2d = zc2d = np.empty((0, 2))
 
-    fig, ax = plt.subplots(figsize=(7, 6))
+    fig, ax = plt.subplots(figsize=(3.5, 3.0))
 
     for label, colour, name in [
-        (0, "#3b6fdb", "Blue room"),
-        (1, "#2da35c", "Green room"),
+        (0, _C["blue"],  "Blue room"),
+        (1, _C["green"], "Green room"),
     ]:
         m = (hue_label == label) & ~tp_flag
-        ax.scatter(z2d[m, 0], z2d[m, 1], c=colour, s=6, alpha=0.25,
+        ax.scatter(z2d[m, 0], z2d[m, 1], c=colour, s=4, alpha=0.22,
                    linewidths=0, label=name)
 
     if tp_flag.any():
         ax.scatter(z2d[tp_flag, 0], z2d[tp_flag, 1],
-                   marker="*", s=80, c="red", zorder=5, label="Teleport frame")
+                   marker="*", s=50, c=_C["tp"], zorder=5,
+                   linewidths=0.3, edgecolors="white", label="Teleport frame")
 
     for i in range(len(zf2d)):
         ax.annotate(
             "", xy=(zc2d[i, 0], zc2d[i, 1]), xytext=(zf2d[i, 0], zf2d[i, 1]),
-            arrowprops=dict(arrowstyle="->", color="purple", lw=1.2),
+            arrowprops=dict(arrowstyle="-|>", color=_C["purple"],
+                            lw=0.9, mutation_scale=6),
         )
     if len(zf2d):
-        ax.scatter(zf2d[:, 0], zf2d[:, 1], c="purple", s=50,
-                   zorder=6, label="z_fact (factual context)")
-        ax.scatter(zc2d[:, 0], zc2d[:, 1], c="orange", s=50,
-                   marker="D", zorder=6, label="z_cf (hue-intervened)")
+        ax.scatter(zf2d[:, 0], zf2d[:, 1], c=_C["purple"], s=25,
+                   zorder=6, label=r"$z_\mathrm{fact}$")
+        ax.scatter(zc2d[:, 0], zc2d[:, 1], c=_C["orange"], s=25,
+                   marker="D", zorder=6, label=r"$z_\mathrm{cf}$")
 
-    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} var)")
-    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} var)")
-    ax.set_title(
-        "Latent space PCA — hue intervention (purple arrows)\n"
-        "Short parallel arrows → hue isolated (ICM, good)\n"
-        "Arrows crossing teleport cluster → hue entangled with causal signal"
-    )
-    ax.legend(fontsize=8, markerscale=2)
-    plt.tight_layout()
-    fig.savefig(out_dir / f"latent_pca{suffix}.png", dpi=150)
-    plt.close(fig)
+    var0 = pca.explained_variance_ratio_[0] * 100
+    var1 = pca.explained_variance_ratio_[1] * 100
+    ax.set_xlabel(f"PC1 ({var0:.1f}% var.)")
+    ax.set_ylabel(f"PC2 ({var1:.1f}% var.)")
+    ax.legend(loc="upper left", markerscale=2.0, handletextpad=0.4)
+    _despine(ax)
+
+    _save_fig(fig, out_dir, f"latent_pca{suffix}")
 
 
 # ---------------------------------------------------------------------------

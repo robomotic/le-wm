@@ -168,6 +168,47 @@ hue-invariant under the intervention defined by the AAP probe.
 **Effort:** environment config change + new data collection run; no model or training
 code changes.
 
+### Results (2026-04-23, checkpoint `lewm_epoch_50`, original model — no retraining)
+
+Dataset: `glitched_hue_optionc` — 5000 episodes (2500 blue/disabled + 2500 green/enabled),
+450,235 steps. Reversed confound: blue room ↔ teleport disabled, green room ↔ teleport enabled.
+
+| Metric | Baseline (original dataset) | Option A (pixel hidden) | Option B (retrained + pixel hidden) | Option C (reversed dataset) |
+|--------|---------------------------|------------------------|--------------------------------------|------------------------------|
+| Position R² | 0.984 | — | 0.993 | 0.987 |
+| Hue probe accuracy | — | — | 1.000 | 1.000 |
+| Surprise factual | — | — | 0.010614 | 0.369384 |
+| Surprise counterfactual | — | — | 0.035317 | 0.295552 |
+| Surprise ratio (cf / fact) | 0.718 | 0.867 | 3.327 | **0.800** |
+| Structural invariance error | 0.380 | — | 0.204 | **0.777** |
+| AAP consistency advantage | — | — | 0.903 | 1.074 |
+
+**Interpretation:** The surprise ratio of 0.800 stays below 1.0, which means the model
+does not catastrophically fail when the hue–teleport confound is reversed. Unlike Option B
+(ratio 3.33), the model is not simply reading off hue to make predictions.
+
+However, two signals indicate the model leans heavily on hue as a shortcut:
+
+1. **Structural invariance error 0.777** (vs. 0.380 baseline) — when hue and teleport are
+   anti-correlated, the model's latent space becomes significantly more entangled. Position
+   and hue representations that were cleanly separated on the training distribution mix when
+   the confound flips.
+
+2. **Factual surprise 0.369** (vs. ~0.01 in Option B baseline) — the model is genuinely
+   confused seeing teleport fire in a green room. The overall surprise level is ~35× higher
+   than with the original dataset, confirming the model built strong prior expectations about
+   green rooms.
+
+**Verdict:** The model has *partial* causal generalisation. The teleport pixel provides
+enough grounding that the ratio stays below 1.0, but the elevated structural invariance
+error and high absolute surprise reveal that hue is a load-bearing cue. A truly causal
+model would show a surprise ratio and structural invariance error comparable to the
+original dataset, not 2× worse.
+
+**Remaining step:** Run the reversed dataset with pixel hidden (Option C + Option A combined)
+to check whether the latent causal signal survives with both the pixel AND the hue confound
+simultaneously removed.
+
 ---
 
 ## Recommendation
