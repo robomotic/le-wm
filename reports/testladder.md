@@ -211,14 +211,47 @@ simultaneously removed.
 
 ---
 
+## Option C+A — Double-blind (reversed dataset + pixel masked)
+
+Strictest test: the teleport pixel is zeroed at test time AND the hue confound is
+reversed in the dataset. Both observational shortcuts are simultaneously removed.
+If the model has a genuine latent causal variable for teleport availability, the
+surprise ratio should remain below 1.0 even here.
+
+### Results (2026-04-23, checkpoint `lewm_epoch_50`)
+
+| Metric | Value |
+|--------|-------|
+| Position R² | 0.987 |
+| Hue probe accuracy | 1.000 |
+| Surprise factual | 0.458 |
+| Surprise counterfactual | 0.568 |
+| Surprise ratio (cf / fact) | **1.2403** |
+| Structural invariance error | **1.032** |
+| AAP consistency advantage | 1.035 |
+| Surprise with evidence | 0.286 |
+| Surprise without evidence | 1.321 |
+
+**Verdict: no Ladder 3 causal structure.** With both cues removed, the surprise ratio
+crosses 1.0 for the first time (1.24). The model is *more* surprised by the counterfactual
+than by the factual teleport event — the defining signature of a model that has no latent
+causal variable to fall back on.
+
+The structural invariance error of 1.032 is also the worst across all experiments,
+confirming total entanglement of hue and position representations when neither shortcut
+is available.
+
+---
+
 ## Summary of all runs (2026-04-22 / 23)
 
-| Experiment | Model | Dataset | Pixel masked? | Surprise ratio | Struct. inv. error |
-|-----------|-------|---------|--------------|---------------|-------------------|
-| Baseline | `lewm_epoch_50` | original | No | 0.718 | 0.380 |
-| Option A | `lewm_epoch_50` | original | Yes (test-time) | 0.867 | — |
-| Option B | `ts_1776884938/lewm_epoch_50` | original | Yes (train+test) | 3.327 | 0.204 |
-| Option C | `lewm_epoch_50` | reversed confound | No | 0.800 | 0.777 |
+| Experiment | Pixel masked | Hue confound | Surprise ratio | Struct. inv. error | Verdict |
+|-----------|-------------|-------------|---------------|-------------------|---------|
+| Baseline | No | Normal | 0.718 | 0.380 | Pixel + hue both available |
+| Option A | Yes (test-time) | Normal | 0.867 | — | Only hue available |
+| Option B | Yes (train+test) | Normal | 3.327 | 0.204 | Hue over-latched |
+| Option C | No | Reversed | 0.800 | 0.777 | Pixel available; hue anti-correlated |
+| **Option C+A** | **Yes** | **Reversed** | **1.240** | **1.032** | **Both removed → model fails** |
 
 **What the ladder of experiments shows:**
 
@@ -227,25 +260,14 @@ simultaneously removed.
 
 - **Hue is the next-best shortcut (Option B):** forcing the model to predict without the
   pixel caused it to latch onto hue (perfect confound in training), pushing ratio to 3.33.
-  Pixel masking alone is not sufficient when hue is still perfectly correlated.
+  Pixel masking alone is insufficient when hue is still perfectly correlated.
 
 - **Model partially survives confound reversal (Option C):** the ratio on the reversed
-  dataset (0.800) is close to baseline, but factual surprise is 35× higher and structural
-  invariance degrades 2×. The model has *partial* causal generalisation — the teleport
-  pixel grounds prediction enough to avoid collapse, but hue is still load-bearing.
+  dataset (0.800) stays below 1.0 — the teleport pixel still grounds prediction. But
+  factual surprise is 35× higher and structural invariance degrades 2×, revealing hue is
+  load-bearing.
 
-**Remaining experiment:** Option C + pixel hidden (double-blind) — reversed confound with
-pixel zeroed at test time. This is the strictest test: both cues are simultaneously removed.
-
-```bash
-modal run modaldotcom/app.py --do-causal-test \
-    --policy lewm_epoch_50 \
-    --dataset-name glitched_hue_optionc \
-    --mask-causal-test \
-    --no-wandb
-```
-
-| Expected outcome | Interpretation |
-|-----------------|----------------|
-| Ratio ≈ 0.72–0.87 (near baseline) | Latent causal variable survives without pixel or hue — Ladder 3 evidence |
-| Ratio → 1.0 or higher | No residual causal structure; model relied entirely on pixel + hue shortcuts |
+- **Double-blind fails (Option C+A):** removing both shortcuts pushes the ratio above 1.0.
+  The model has no residual latent causal mechanism. `lewm_epoch_50` is a Ladder 1/2 model
+  that relies on direct pixel observation and hue as a spurious shortcut — not a Ladder 3
+  causal reasoner.
