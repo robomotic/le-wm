@@ -7,6 +7,84 @@ from torchvision.transforms import v2 as tv_transforms
 from lightning.pytorch.callbacks import Callback
 
 
+def detect_teleport_bbox(dataset_path: str, n_samples: int = 100) -> tuple:
+    """Return (row_min, row_max, col_min, col_max) of the teleport marker in pixel space.
+
+    Uses differential comparison between teleport frames (blue room, marker visible)
+    and green-room frames (no marker, but door still white) to isolate the marker
+    from other persistent white features like the door.
+
+    Works whether the teleport position was fixed or varied — no coordinates hardcoded.
+    """
+    import h5py
+
+    rng = np.random.default_rng(0)
+
+    with h5py.File(dataset_path, "r") as f:
+        tp_mask = f["teleported"][:]                       # (N,) bool
+        n_total = len(tp_mask)
+
+        tp_indices = np.where(tp_mask)[0][:n_samples]
+        if len(tp_indices) == 0:
+            raise RuntimeError("No teleported=True steps found in dataset.")
+
+        # Sample random frames; identify green-room ones from a background pixel at
+        # (row=40, col=30) — away from wall, door, agent, and teleport marker.
+        candidates = np.sort(rng.choice(n_total, min(n_total, 8000), replace=False))
+        bg_px = f["pixels"][candidates.tolist(), 40, 30, :]  # (n, 3) uint8
+        is_green = (bg_px[:, 1].astype(int) - bg_px[:, 2].astype(int)) > 50
+        green_indices = np.sort(candidates[is_green][:n_samples])
+        if len(green_indices) < 10:
+            raise RuntimeError("Could not find enough green-room frames for differential detection.")
+
+        tp_frames    = f["pixels"][np.sort(tp_indices).tolist()]   # (n, H, W, 3)
+        green_frames = f["pixels"][green_indices.tolist()]          # (m, H, W, 3)
+
+    def _bright(frames):
+        return (
+            (frames[:, :, :, 0] > 200)
+            & (frames[:, :, :, 1] > 200)
+            & (frames[:, :, :, 2] > 200)
+        ).mean(axis=0)
+
+    delta = _bright(tp_frames) - _bright(green_frames)
+    marker_mask = delta > 0.5
+
+    rows = np.where(marker_mask.any(axis=1))[0]
+    cols = np.where(marker_mask.any(axis=0))[0]
+    if len(rows) == 0 or len(cols) == 0:
+        raise RuntimeError(
+            "Teleport marker could not be isolated via differential detection. "
+            "Ensure teleported=True frames and green-room frames are present."
+        )
+
+    PATCH = 14
+    r0 = (int(rows.min()) // PATCH) * PATCH
+    r1 = (int(rows.max()) // PATCH + 1) * PATCH
+    c0 = (int(cols.min()) // PATCH) * PATCH
+    c1 = (int(cols.max()) // PATCH + 1) * PATCH
+    return r0, r1, c0, c1
+
+
+class TeleportPatchMask:
+    """Zero out the teleport pixel patch in ImageNet-normalized CHW tensors.
+
+    Use mask_prob=0.5 during training and 1.0 at evaluation time (Option B).
+    """
+
+    def __init__(self, tp_bbox: tuple, mask_prob: float = 0.5):
+        self.tp_bbox = tp_bbox
+        self.mask_prob = mask_prob
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        if self.mask_prob < 1.0 and torch.rand(1).item() >= self.mask_prob:
+            return x
+        r0, r1, c0, c1 = self.tp_bbox
+        x = x.clone()
+        x[..., r0:r1, c0:c1] = 0.0
+        return x
+
+
 def get_stablewm_home() -> Path:
     """Return the stable-worldmodel cache directory.
 

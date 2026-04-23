@@ -10,11 +10,17 @@ modal run modaldotcom/app.py --do-train
 # Training with overrides
 modal run modaldotcom/app.py --do-train --max-epochs 50 --no-wandb
 
+# Option B — train with teleport patch masking (p=0.5)
+modal run modaldotcom/app.py --do-train --mask-teleport-prob 0.5
+
 # Evaluation  (use the job_id printed at the end of training)
 modal run modaldotcom/app.py --do-eval --policy <job_id>/lewm_epoch_100
 
 # Smoke test (1 epoch, no W&B)
 modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb
+
+# Causal test (Step 3 — AAP pipeline, logs causal/* metrics + plots to W&B)
+modal run modaldotcom/app.py --do-causal-test --policy <job_id>/lewm_epoch_50
 """
 
 import subprocess
@@ -75,6 +81,7 @@ image = (
         "wandb",
         "huggingface_hub",
         "scikit-learn",
+        "matplotlib",
     )
     # Copy the local le-wm repo (train.py, eval.py, jepa.py, module.py,
     # utils.py, config/) into the container image at build time.
@@ -120,6 +127,7 @@ def train(
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     wandb_enabled: bool = True,
+    mask_teleport_prob: float = 0.0,
 ) -> str:
     """Run train.py on a cloud A10G and persist checkpoints to the volume.
 
@@ -128,12 +136,21 @@ def train(
     import glob
     import os
 
+    import time
+    run_ts = str(int(time.time()))
+
     cmd = [
         "python", "train.py",
         f"data={data}",
         f"trainer.max_epochs={max_epochs}",
         f"wandb.enabled={'True' if wandb_enabled else 'False'}",
+        f"subdir=ts_{run_ts}",
     ]
+    if mask_teleport_prob > 0.0:
+        cmd += [
+            "augmentation.teleport_patch_mask.enabled=True",
+            f"augmentation.teleport_patch_mask.mask_probability={mask_teleport_prob}",
+        ]
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, cwd="/workspace")
 
@@ -160,6 +177,57 @@ def train(
     else:
         print("⚠️  No checkpoint found after training.")
         return ""
+
+
+# ---------------------------------------------------------------------------
+# Dataset inspection function (no GPU — reads HDF5 from volume)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={CACHE_DIR: volume},
+    env=ENV,
+    timeout=120,
+)
+def inspect_dataset(name: str = "glitched_hue_tworoom_half") -> None:
+    """Print HDF5 dataset columns, shapes, dtypes, and a sample of variation fields.
+
+    Args:
+        name: Dataset name (without .h5 extension) relative to STABLEWM_HOME.
+    """
+    import h5py
+    import numpy as np
+
+    path = f"{CACHE_DIR}/{name}.h5"
+    print(f"\nInspecting: {path}\n{'='*60}")
+
+    with h5py.File(path, "r") as f:
+        ep_len = f["ep_len"][:]
+        print(f"Episodes : {len(ep_len)}")
+        print(f"Steps    : {int(ep_len.sum())}")
+        print(f"Ep length: {int(ep_len.min())} – {int(ep_len.max())}")
+        print(f"\n{'Column':<45} {'Shape':<25} {'Dtype'}")
+        print("-" * 80)
+        for k in sorted(f.keys()):
+            if k in ("ep_len", "ep_offset"):
+                continue
+            ds = f[k]
+            print(f"{k:<45} {str(ds.shape):<25} {ds.dtype}")
+
+        # Sample first episode of all variation.* columns to show range
+        print(f"\n{'='*60}")
+        print("First-episode sample of variation.* columns:")
+        ep0_start = int(f["ep_offset"][0])
+        ep0_end = ep0_start + int(ep_len[0])
+        for k in sorted(f.keys()):
+            if not k.startswith("variation."):
+                continue
+            data = f[k][ep0_start:ep0_end]
+            unique = np.unique(data.reshape(len(data), -1), axis=0)
+            print(f"  {k}: first_ep unique values = {unique[:5].tolist()}"
+                  f"{'...' if len(unique) > 5 else ''}")
+
+    print(f"{'='*60}\n")
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +342,61 @@ def evaluate(
 
 
 # ---------------------------------------------------------------------------
+# Causal test function (Step 3 — AAP disentanglement pipeline)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    gpu="A10G",
+    volumes={CACHE_DIR: volume},
+    secrets=[wandb_secret],
+    env=ENV,
+    timeout=3600,   # 1 h — probe training + AAP rollout well within budget
+)
+def causal_test(policy: str, no_wandb: bool = False, mask_teleport: bool = False) -> str:
+    """Run research/glitched_hue_experiment.py on a cloud A10G (Step 3 of runme.md).
+
+    Executes five stages: trajectory encoding, position+hue probe training,
+    AAP cycle (Abduction-Action-Prediction), structural invariance check,
+    and surprise-ratio verdict.  Writes causal_test_results.json plus two
+    diagnostic plots to the volume alongside the checkpoint.
+
+    Args:
+        policy:    Checkpoint path relative to STABLEWM_HOME, without the
+                   '_object.ckpt' suffix.
+                   Example: '2024-01-01/0/lewm_epoch_50'
+        no_wandb:  If True, skip W&B logging (dry run).
+
+    Returns:
+        Absolute path of the JSON results file written to the volume.
+    """
+    import os
+
+    ckpt_path = f"{CACHE_DIR}/{policy}_object.ckpt"
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found on volume: {ckpt_path}\n"
+            "Verify the policy path and that the volume is mounted."
+        )
+
+    cmd = ["python", "research/glitched_hue_experiment.py", ckpt_path]
+    if no_wandb:
+        cmd.append("--no-wandb")
+    if mask_teleport:
+        cmd.append("--mask-teleport")
+
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd="/workspace")
+
+    volume.commit()
+
+    suffix = "_masked" if mask_teleport else ""
+    results_file = f"{CACHE_DIR}/{os.path.dirname(policy)}/causal_test{suffix}_results.json"
+    print(f"\n✅ Causal test complete. Results: {results_file}")
+    return results_file
+
+
+# ---------------------------------------------------------------------------
 # Local entrypoint
 # ---------------------------------------------------------------------------
 
@@ -282,12 +405,17 @@ def main(
     do_train: bool = False,
     do_eval: bool = False,
     do_stats: bool = False,
+    do_causal_test: bool = False,
+    do_inspect: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
     config_name: str = "glitched_hue_tworoom",
     run_id: str = "",
     no_wandb: bool = False,
+    dataset_name: str = "glitched_hue_tworoom_half",
+    mask_causal_test: bool = False,
+    mask_teleport_prob: float = 0.0,
 ) -> None:
     """Orchestrate training and/or evaluation on Modal.
 
@@ -302,14 +430,28 @@ def main(
     # Evaluation with a known checkpoint
     modal run modaldotcom/app.py --do-eval --policy 2024-01-01/0/lewm_epoch_100
 
+    # Causal disentanglement test (AAP pipeline)
+    modal run modaldotcom/app.py --do-causal-test --policy 2024-01-01/0/lewm_epoch_50
+
+    # Option A — Ladder 3 test: mask the teleport pixel patch before every encode
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --mask-causal-test
+
+    # Option B — retrain with teleport patch masking (p=0.5) then run masked causal test
+    modal run modaldotcom/app.py --do-train --mask-teleport-prob 0.5
+    modal run modaldotcom/app.py --do-causal-test --policy <new_job_id>/lewm_epoch_100 --mask-causal-test
+
+    # Inspect dataset columns and variation fields
+    modal run modaldotcom/app.py --do-inspect
+    modal run modaldotcom/app.py --do-inspect --dataset-name glitched_hue_tworoom
+
     # Stats for the most recent WandB run
     modal run modaldotcom/app.py --do-stats
 
     # Stats for a specific run
     modal run modaldotcom/app.py --do-stats --run-id 80aovwgh
     """
-    if not do_train and not do_eval and not do_stats:
-        print("Nothing to do. Pass --do-train, --do-eval, and/or --do-stats.")
+    if not do_train and not do_eval and not do_stats and not do_causal_test and not do_inspect:
+        print("Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, and/or --do-inspect.")
         return
 
     policy_path = policy
@@ -318,6 +460,7 @@ def main(
             data=data,
             max_epochs=max_epochs,
             wandb_enabled=not no_wandb,
+            mask_teleport_prob=mask_teleport_prob,
         )
         # If the user also requested eval in the same invocation, chain it.
         if do_eval and not policy and policy_path:
@@ -332,3 +475,14 @@ def main(
 
     if do_stats:
         stats.remote(run_id=run_id)
+
+    if do_causal_test:
+        if not policy:
+            print("--do-causal-test requires --policy <path>. Example:")
+            print("  modal run modaldotcom/app.py --do-causal-test --policy <job_id>/lewm_epoch_50")
+            return
+        results_file = causal_test.remote(policy=policy, no_wandb=no_wandb, mask_teleport=mask_causal_test)
+        print(f"Results file on volume: {results_file}")
+
+    if do_inspect:
+        inspect_dataset.remote(name=dataset_name)

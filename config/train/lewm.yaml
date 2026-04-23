@@ -62,3 +62,8 @@ loss:
     kwargs:
       knots: 17
       num_proj: 1024
+
+augmentation:
+  teleport_patch_mask:
+    enabled: false
+    mask_probability: 0.5

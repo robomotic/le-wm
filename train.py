@@ -71,7 +71,19 @@ def run(cfg):
 
     dataset = swm.data.HDF5Dataset(**cfg.data.dataset, transform=None)
     transforms = [get_img_preprocessor(source='pixels', target='pixels', img_size=cfg.img_size)]
-    
+
+    aug = cfg.get("augmentation")
+    if aug and aug.teleport_patch_mask.enabled:
+        dataset_path = str(swm.data.utils.get_cache_dir() / f"{cfg.data.dataset.name}.h5")
+        from utils import detect_teleport_bbox, TeleportPatchMask
+        tp_bbox = detect_teleport_bbox(dataset_path)
+        mask_prob = aug.teleport_patch_mask.mask_probability
+        print(f"[TeleportPatchMask] bbox={tp_bbox}, mask_prob={mask_prob}")
+        mask_fn = TeleportPatchMask(tp_bbox, mask_prob)
+        transforms.append(
+            spt.data.transforms.WrapTorchTransform(mask_fn, source="pixels", target="pixels")
+        )
+
     with open_dict(cfg):
         for col in cfg.data.dataset.keys_to_load:
             if col.startswith("pixels"):
