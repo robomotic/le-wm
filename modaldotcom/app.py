@@ -289,18 +289,30 @@ def collect_optionc(n_episodes: int = 5000, seed: int = 42) -> str:
 def remerge_optionc() -> str:
     """Re-run the merge step from existing half-files (skips collection).
 
+    Runs the merge inline (not as a subprocess) so that h5py writes go
+    directly to the Modal volume mount — no cross-process cache coherency
+    issues before volume.commit().
+
     Use this when the half-files (_blue.h5 / _green.h5) are already on the
     volume but the merged glitched_hue_optionc.h5 is corrupt or missing.
     """
-    import subprocess
+    import os
+    import sys
+    from pathlib import Path
+
     volume.reload()
-    cmd = ["python", "research/collect_option_c.py", "--only-merge"]
-    print(f"Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True, cwd="/workspace")
+
+    sys.path.insert(0, "/workspace")
+    from research.collect_option_c import _merge_halves  # noqa: E402
+
+    cache = Path(CACHE_DIR)
+    out = _merge_halves(cache)
+
+    fsize = os.path.getsize(str(out))
+    print(f"File size before commit: {fsize:,} bytes")
     volume.commit()
-    out = f"{CACHE_DIR}/glitched_hue_optionc.h5"
-    print(f"\n✅ Merged dataset on volume: {out}")
-    return out
+    print(f"\n✅ Merged dataset on volume: {out}  ({fsize:,} bytes)")
+    return str(out)
 
 
 # ---------------------------------------------------------------------------
