@@ -231,6 +231,43 @@ def inspect_dataset(name: str = "glitched_hue_tworoom_half") -> None:
 
 
 # ---------------------------------------------------------------------------
+# Option C — reversed-confound data collection (no GPU)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={CACHE_DIR: volume},
+    env=ENV,
+    timeout=7200,   # 2 h ceiling for 5000 episodes
+)
+def collect_optionc(n_episodes: int = 5000, seed: int = 42) -> str:
+    """Collect the Option C reversed-confound dataset on a cloud CPU worker.
+
+    Runs two fixed-option passes (blue/disabled + green/enabled) via
+    World.record_dataset(), then merges them into one HDF5 file.
+
+    Args:
+        n_episodes: Total episodes (split 50/50 between the two conditions).
+        seed: RNG seed for reproducibility.
+
+    Returns:
+        Absolute path of the merged HDF5 file on the volume.
+    """
+    import subprocess
+    cmd = [
+        "python", "research/collect_option_c.py",
+        f"--n-episodes={n_episodes}",
+        f"--seed={seed}",
+    ]
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd="/workspace")
+    volume.commit()
+    out = f"{CACHE_DIR}/glitched_hue_optionc.h5"
+    print(f"\n✅ Dataset written to volume: {out}")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Stats function  (no GPU — pure WandB API query)
 # ---------------------------------------------------------------------------
 
@@ -353,7 +390,12 @@ def evaluate(
     env=ENV,
     timeout=3600,   # 1 h — probe training + AAP rollout well within budget
 )
-def causal_test(policy: str, no_wandb: bool = False, mask_teleport: bool = False) -> str:
+def causal_test(
+    policy: str,
+    no_wandb: bool = False,
+    mask_teleport: bool = False,
+    dataset_name: str = "glitched_hue_tworoom_half",
+) -> str:
     """Run research/glitched_hue_experiment.py on a cloud A10G (Step 3 of runme.md).
 
     Executes five stages: trajectory encoding, position+hue probe training,
@@ -384,13 +426,16 @@ def causal_test(policy: str, no_wandb: bool = False, mask_teleport: bool = False
         cmd.append("--no-wandb")
     if mask_teleport:
         cmd.append("--mask-teleport")
+    if dataset_name != "glitched_hue_tworoom_half":
+        cmd += ["--dataset-name", dataset_name]
 
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, cwd="/workspace")
 
     volume.commit()
 
-    suffix = "_masked" if mask_teleport else ""
+    ds_suffix = f"_{dataset_name}" if dataset_name != "glitched_hue_tworoom_half" else ""
+    suffix = ("_masked" if mask_teleport else "") + ds_suffix
     results_file = f"{CACHE_DIR}/{os.path.dirname(policy)}/causal_test{suffix}_results.json"
     print(f"\n✅ Causal test complete. Results: {results_file}")
     return results_file
@@ -407,6 +452,7 @@ def main(
     do_stats: bool = False,
     do_causal_test: bool = False,
     do_inspect: bool = False,
+    do_collect_optionc: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
@@ -416,6 +462,7 @@ def main(
     dataset_name: str = "glitched_hue_tworoom_half",
     mask_causal_test: bool = False,
     mask_teleport_prob: float = 0.0,
+    optionc_episodes: int = 5000,
 ) -> None:
     """Orchestrate training and/or evaluation on Modal.
 
@@ -440,6 +487,12 @@ def main(
     modal run modaldotcom/app.py --do-train --mask-teleport-prob 0.5
     modal run modaldotcom/app.py --do-causal-test --policy <new_job_id>/lewm_epoch_100 --mask-causal-test
 
+    # Option C — collect reversed-confound dataset then run causal test on it
+    modal run modaldotcom/app.py --do-collect-optionc
+    modal run modaldotcom/app.py --do-inspect --dataset-name glitched_hue_optionc
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --dataset-name glitched_hue_optionc
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --dataset-name glitched_hue_optionc --mask-causal-test
+
     # Inspect dataset columns and variation fields
     modal run modaldotcom/app.py --do-inspect
     modal run modaldotcom/app.py --do-inspect --dataset-name glitched_hue_tworoom
@@ -450,8 +503,8 @@ def main(
     # Stats for a specific run
     modal run modaldotcom/app.py --do-stats --run-id 80aovwgh
     """
-    if not do_train and not do_eval and not do_stats and not do_causal_test and not do_inspect:
-        print("Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, and/or --do-inspect.")
+    if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect, do_collect_optionc]):
+        print("Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, --do-inspect, and/or --do-collect-optionc.")
         return
 
     policy_path = policy
@@ -476,12 +529,21 @@ def main(
     if do_stats:
         stats.remote(run_id=run_id)
 
+    if do_collect_optionc:
+        out = collect_optionc.remote(n_episodes=optionc_episodes)
+        print(f"Option C dataset on volume: {out}")
+
     if do_causal_test:
         if not policy:
             print("--do-causal-test requires --policy <path>. Example:")
             print("  modal run modaldotcom/app.py --do-causal-test --policy <job_id>/lewm_epoch_50")
             return
-        results_file = causal_test.remote(policy=policy, no_wandb=no_wandb, mask_teleport=mask_causal_test)
+        results_file = causal_test.remote(
+            policy=policy,
+            no_wandb=no_wandb,
+            mask_teleport=mask_causal_test,
+            dataset_name=dataset_name,
+        )
         print(f"Results file on volume: {results_file}")
 
     if do_inspect:

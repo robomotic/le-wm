@@ -76,13 +76,21 @@ def main():
             "inference alone — Option A Ladder 3 test (reports/testladder.md)."
         ),
     )
+    parser.add_argument(
+        "--dataset-name", default=_DATASET_NAME,
+        help="HDF5 dataset name in STABLEWM_HOME (default: glitched_hue_tworoom_half)",
+    )
     args = parser.parse_args()
 
+    dataset_name = args.dataset_name
+    ds_suffix = f"_{dataset_name}" if dataset_name != _DATASET_NAME else ""
     suffix  = "_masked" if args.mask_teleport else ""
+    suffix  = suffix + ds_suffix
     out_dir = Path(args.ckpt_path).parent
     print(f"Device   : {_DEVICE}")
     print(f"Output   : {out_dir}")
     print(f"Mask TP  : {args.mask_teleport}")
+    print(f"Dataset  : {dataset_name}")
 
     # -------------------------------------------------------------------
     # Stage 0 — Detect teleport patch bbox (only when masking is requested)
@@ -90,7 +98,7 @@ def main():
     tp_bbox = None
     if args.mask_teleport:
         import stable_worldmodel as swm
-        dataset_path = str(swm.data.utils.get_cache_dir() / f"{_DATASET_NAME}.h5")
+        dataset_path = str(swm.data.utils.get_cache_dir() / f"{dataset_name}.h5")
         print(f"\n[0/5] Detecting teleport patch bbox from {dataset_path} ...")
         tp_bbox = _detect_teleport_bbox(dataset_path)
         r0, r1, c0, c1 = tp_bbox
@@ -110,7 +118,7 @@ def main():
     # Stage 2 — Extract latents; train linear probes
     # -------------------------------------------------------------------
     print(f"\n[2/5] Extracting latents ({args.n_probe_batches} batches) ...")
-    loader = _make_loader()
+    loader = _make_loader(dataset_name=dataset_name)
     z_all, hue_all, pos_all, max_deltas = _extract_probe_data(
         jepa, loader, args.n_probe_batches,
         mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
@@ -235,8 +243,8 @@ def _mask_tp(pixels: torch.Tensor, tp_bbox: tuple) -> torch.Tensor:
 # Stage 2 — Data loading and probe training
 # ---------------------------------------------------------------------------
 
-def _make_loader(batch_size=64, shuffle=True):
-    """Build a DataLoader over glitched_hue_tworoom_half with the training pipeline."""
+def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME):
+    """Build a DataLoader over the given HDF5 dataset with the training pipeline."""
     import stable_worldmodel as swm
     import stable_pretraining as spt
     from utils import get_img_preprocessor, get_column_normalizer
@@ -244,7 +252,7 @@ def _make_loader(batch_size=64, shuffle=True):
     dataset = swm.data.HDF5Dataset(
         num_steps=_NUM_STEPS,
         frameskip=_FRAMESKIP,
-        name=_DATASET_NAME,
+        name=dataset_name,
         keys_to_load=["pixels", "action", "proprio"],
         keys_to_cache=["action", "proprio"],
         transform=None,
