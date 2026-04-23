@@ -10,35 +10,34 @@ from lightning.pytorch.callbacks import Callback
 def detect_teleport_bbox(dataset_path: str, n_samples: int = 100) -> tuple:
     """Return (row_min, row_max, col_min, col_max) of the teleport marker in pixel space.
 
-    Uses differential comparison between teleport frames (blue room, marker visible)
-    and green-room frames (no marker, but door still white) to isolate the marker
-    from other persistent white features like the door.
+    Uses differential comparison between teleport frames (marker visible) and
+    non-teleport frames (no marker) to isolate the marker from persistent white
+    features like the door — which appears in ALL frames and therefore cancels out.
 
-    Works whether the teleport position was fixed or varied — no coordinates hardcoded.
+    Room-colour agnostic: works for both the original dataset (marker in blue rooms)
+    and the reversed-confound dataset (marker in green rooms).
     """
     import h5py
 
     rng = np.random.default_rng(0)
 
     with h5py.File(dataset_path, "r") as f:
-        tp_mask = f["teleported"][:]                       # (N,) bool
+        tp_mask = f["teleported"][:]        # (N,) bool
         n_total = len(tp_mask)
 
-        tp_indices = np.where(tp_mask)[0][:n_samples]
+        tp_indices = np.where(tp_mask)[0]
+        no_tp_indices = np.where(~tp_mask)[0]
+
         if len(tp_indices) == 0:
             raise RuntimeError("No teleported=True steps found in dataset.")
+        if len(no_tp_indices) < 10:
+            raise RuntimeError("Not enough teleported=False frames for differential detection.")
 
-        # Sample random frames; identify green-room ones from a background pixel at
-        # (row=40, col=30) — away from wall, door, agent, and teleport marker.
-        candidates = np.sort(rng.choice(n_total, min(n_total, 8000), replace=False))
-        bg_px = f["pixels"][candidates.tolist(), 40, 30, :]  # (n, 3) uint8
-        is_green = (bg_px[:, 1].astype(int) - bg_px[:, 2].astype(int)) > 50
-        green_indices = np.sort(candidates[is_green][:n_samples])
-        if len(green_indices) < 10:
-            raise RuntimeError("Could not find enough green-room frames for differential detection.")
+        tp_sample    = np.sort(rng.choice(tp_indices,    min(len(tp_indices),    n_samples), replace=False))
+        ctrl_sample  = np.sort(rng.choice(no_tp_indices, min(len(no_tp_indices), n_samples), replace=False))
 
-        tp_frames    = f["pixels"][np.sort(tp_indices).tolist()]   # (n, H, W, 3)
-        green_frames = f["pixels"][green_indices.tolist()]          # (m, H, W, 3)
+        tp_frames   = f["pixels"][tp_sample.tolist()]    # (n, H, W, 3)
+        ctrl_frames = f["pixels"][ctrl_sample.tolist()]  # (m, H, W, 3)
 
     def _bright(frames):
         return (
@@ -47,7 +46,7 @@ def detect_teleport_bbox(dataset_path: str, n_samples: int = 100) -> tuple:
             & (frames[:, :, :, 2] > 200)
         ).mean(axis=0)
 
-    delta = _bright(tp_frames) - _bright(green_frames)
+    delta = _bright(tp_frames) - _bright(ctrl_frames)
     marker_mask = delta > 0.5
 
     rows = np.where(marker_mask.any(axis=1))[0]
@@ -55,7 +54,7 @@ def detect_teleport_bbox(dataset_path: str, n_samples: int = 100) -> tuple:
     if len(rows) == 0 or len(cols) == 0:
         raise RuntimeError(
             "Teleport marker could not be isolated via differential detection. "
-            "Ensure teleported=True frames and green-room frames are present."
+            "Ensure teleported=True and teleported=False frames are present."
         )
 
     PATCH = 14
