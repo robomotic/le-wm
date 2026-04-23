@@ -79,7 +79,7 @@ def collect(n_episodes: int, seed: int = 42) -> Path:
     import stable_worldmodel as swm
 
     cache = swm.data.utils.get_cache_dir()
-    world = swm.World("swm/GlitchedHueTwoRoom-v1", num_envs=4)
+    world = swm.World("swm/GlitchedHueTwoRoom-v1", num_envs=4, image_shape=(224, 224))
 
     half = n_episodes // 2
 
