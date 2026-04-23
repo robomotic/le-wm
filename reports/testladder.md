@@ -211,15 +211,41 @@ simultaneously removed.
 
 ---
 
-## Recommendation
+## Summary of all runs (2026-04-22 / 23)
 
-Run **Option A first** — it directly answers whether the current epoch-50 model has a
-latent causal variable or is purely doing pixel lookup, with no retraining cost.
+| Experiment | Model | Dataset | Pixel masked? | Surprise ratio | Struct. inv. error |
+|-----------|-------|---------|--------------|---------------|-------------------|
+| Baseline | `lewm_epoch_50` | original | No | 0.718 | 0.380 |
+| Option A | `lewm_epoch_50` | original | Yes (test-time) | 0.867 | — |
+| Option B | `ts_1776884938/lewm_epoch_50` | original | Yes (train+test) | 3.327 | 0.204 |
+| Option C | `lewm_epoch_50` | reversed confound | No | 0.800 | 0.777 |
 
-If the surprise ratio holds below 1.0 after masking → proceed to **Option B** to train
-a model that was *forced* to build the latent causal structure from the start, and
-re-run the masked AAP test to confirm.
+**What the ladder of experiments shows:**
 
-**Option C** is the hardest experiment to argue against because it attacks memorisation
-of the hue–teleport co-occurrence at the dataset level, but requires new environment
-rollouts rather than a script-only change.
+- **Pixel is partially load-bearing (Option A):** hiding it at test time nudges the ratio
+  from 0.718 → 0.867. Some latent signal exists but the model read the pixel directly.
+
+- **Hue is the next-best shortcut (Option B):** forcing the model to predict without the
+  pixel caused it to latch onto hue (perfect confound in training), pushing ratio to 3.33.
+  Pixel masking alone is not sufficient when hue is still perfectly correlated.
+
+- **Model partially survives confound reversal (Option C):** the ratio on the reversed
+  dataset (0.800) is close to baseline, but factual surprise is 35× higher and structural
+  invariance degrades 2×. The model has *partial* causal generalisation — the teleport
+  pixel grounds prediction enough to avoid collapse, but hue is still load-bearing.
+
+**Remaining experiment:** Option C + pixel hidden (double-blind) — reversed confound with
+pixel zeroed at test time. This is the strictest test: both cues are simultaneously removed.
+
+```bash
+modal run modaldotcom/app.py --do-causal-test \
+    --policy lewm_epoch_50 \
+    --dataset-name glitched_hue_optionc \
+    --mask-causal-test \
+    --no-wandb
+```
+
+| Expected outcome | Interpretation |
+|-----------------|----------------|
+| Ratio ≈ 0.72–0.87 (near baseline) | Latent causal variable survives without pixel or hue — Ladder 3 evidence |
+| Ratio → 1.0 or higher | No residual causal structure; model relied entirely on pixel + hue shortcuts |
