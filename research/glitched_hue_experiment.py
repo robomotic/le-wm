@@ -607,7 +607,7 @@ def _plot_surprise_over_time(aap_results, out_dir, suffix=""):
     xs = np.arange(n_steps)
     t_tp = int(np.median([r["teleport_step"] for r in aap_results]))
 
-    fig, ax = plt.subplots(figsize=(3.5, 2.4))
+    fig, ax = plt.subplots(figsize=(3.5, 2.7))
 
     ax.plot(xs, mean_f,  color=_C["blue"],   lw=1.4,
             label="Factual (blue room)")
@@ -625,7 +625,11 @@ def _plot_surprise_over_time(aap_results, out_dir, suffix=""):
     ax.set_xlabel("Prediction step")
     ax.set_ylabel("MSE (surprise)")
     ax.set_xticks(xs)
-    ax.legend(loc="upper right")
+    ax.legend(
+        loc="upper center", bbox_to_anchor=(0.5, -0.18),
+        ncol=3, fontsize=6.5,
+        frameon=False, handletextpad=0.3, columnspacing=0.8,
+    )
     _despine(ax)
 
     _save_fig(fig, out_dir, f"surprise_over_time{suffix}")
