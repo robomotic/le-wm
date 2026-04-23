@@ -45,7 +45,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 _IMG_SIZE = 224
-_NUM_STEPS = 4          # history_size(3) + num_preds(1), matches training config
+_NUM_STEPS = 7          # longer window for the surprise plot (see _run_aap_cycle)
+_HISTORY_SIZE = 3       # must match training config (context cap for sliding window)
 _FRAMESKIP = 5
 _DATASET_NAME = "glitched_hue_tworoom_half"
 
@@ -65,8 +66,8 @@ def main():
         help="DataLoader batches used to train the linear probes (default: 200)",
     )
     parser.add_argument(
-        "--n-aap-episodes", type=int, default=20,
-        help="Teleport episodes to average the AAP cycle over (default: 20)",
+        "--n-aap-episodes", type=int, default=50,
+        help="Teleport episodes to average the AAP cycle over (default: 50)",
     )
     parser.add_argument(
         "--mask-teleport", action="store_true",
@@ -406,20 +407,28 @@ def _run_aap_cycle(jepa, loader, hue_dir, delta_hue, n_episodes,
             if max_delta[b].item() < threshold:
                 continue
 
-            t_tp = min(t_idx[b].item(), T - 2)  # frame index of the teleport
+            t_tp = t_idx[b].item()
+            # Require at least 1 step before AND 2 steps after the teleport so
+            # the plot shows pre-event, event, and post-event surprise.
+            if t_tp < 1 or t_tp > T - 3:
+                continue
+
             z = emb[b]      # (T, D)
             a = act_emb[b]  # (T, A)
 
             surp_f_steps, surp_cf_steps = [], []
             for t in range(T - 1):
-                ctx     = z[:t + 1].unsqueeze(0)    # (1, t+1, D)
-                act_ctx = a[:t + 1].unsqueeze(0)
-                tgt     = z[t + 1].unsqueeze(0)     # (1, D)
+                # Sliding context window capped at _HISTORY_SIZE so the
+                # predictor stays in-distribution (trained on 3-frame context).
+                ctx_start = max(0, t + 1 - _HISTORY_SIZE)
+                ctx     = z[ctx_start:t + 1].unsqueeze(0)    # (1, ≤H, D)
+                act_ctx = a[ctx_start:t + 1].unsqueeze(0)
+                tgt     = z[t + 1].unsqueeze(0)              # (1, D)
 
                 pred_f  = jepa.predict(ctx, act_ctx)[:, -1]
                 surp_f_steps.append(F.mse_loss(pred_f, tgt).item())
 
-                # Counterfactual: translate full context toward green-room cluster
+                # Counterfactual: translate context toward green-room cluster
                 ctx_cf  = ctx + delta_hue
                 pred_cf = jepa.predict(ctx_cf, act_ctx)[:, -1]
                 surp_cf_steps.append(F.mse_loss(pred_cf, tgt).item())
@@ -499,7 +508,9 @@ def _aap_consistency_advantage(jepa, loader, n_warmup=20, n_eval=50,
             pixels = _mask_tp(pixels, tp_bbox)
         out    = jepa.encode({"pixels": pixels, "action": action})
         emb_buf.append(out["emb"].cpu())
+    # Cap to last _HISTORY_SIZE frames so positional embeddings stay in-distribution
     mean_ctx = torch.cat(emb_buf, 0).mean(0, keepdim=True).to(_DEVICE)  # (1, T, D)
+    mean_ctx = mean_ctx[:, -_HISTORY_SIZE:]                              # (1, H, D)
 
     s_with, s_without = [], []
     count = 0
@@ -515,14 +526,15 @@ def _aap_consistency_advantage(jepa, loader, n_warmup=20, n_eval=50,
         act_emb = out["act_emb"]
         B       = emb.size(0)
 
-        ctx     = emb[:, :-1]                            # (B, T-1, D)
-        act_ctx = act_emb[:, :-1]
+        # Sliding context: last _HISTORY_SIZE frames before the final frame
+        ctx     = emb[:, -(_HISTORY_SIZE + 1):-1]       # (B, H, D)
+        act_ctx = act_emb[:, -(_HISTORY_SIZE + 1):-1]
         tgt     = emb[:, -1]                             # (B, D)
 
         # With factual context
         pred_with    = jepa.predict(ctx, act_ctx)[:, -1]
         # With blind (mean) context — actions are still factual
-        blind_ctx    = mean_ctx[:, :-1].expand(B, -1, -1)
+        blind_ctx    = mean_ctx.expand(B, -1, -1)
         pred_without = jepa.predict(blind_ctx, act_ctx)[:, -1]
 
         s_with.append(F.mse_loss(pred_with,    tgt, reduction="none").mean(-1).cpu())
@@ -594,20 +606,39 @@ def _save_plots(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir, suf
 
 
 def _plot_surprise_over_time(aap_results, out_dir, suffix=""):
-    """Per-step factual vs counterfactual surprise, averaged over AAP episodes."""
+    """Per-step factual vs counterfactual surprise aligned to the teleport step.
+
+    X-axis is relative to the teleport event (0 = teleport step) so episodes
+    with different absolute teleport positions can be averaged together.
+    Requires at least 1 pre- and 2 post-teleport steps (enforced in
+    _run_aap_cycle); episodes that don't satisfy this are excluded.
+    """
     if not aap_results:
         return
 
-    n_steps  = len(aap_results[0]["surp_fact_steps"])
-    fact_mat = np.array([r["surp_fact_steps"] for r in aap_results])
-    cf_mat   = np.array([r["surp_cf_steps"]   for r in aap_results])
+    # Align each episode's surprise sequence to its teleport step.
+    # Find the common relative window: max steps before/after across all episodes.
+    pre  = min(r["teleport_step"] for r in aap_results)            # steps before
+    post = min(len(r["surp_fact_steps"]) - 1 - r["teleport_step"]
+               for r in aap_results)                                # steps after
+    window = range(-pre, post + 1)  # e.g. -2, -1, 0, +1, +2
 
+    aligned_f, aligned_cf = [], []
+    for r in aap_results:
+        t0 = r["teleport_step"]
+        aligned_f.append( [r["surp_fact_steps"][t0 + dt] for dt in window])
+        aligned_cf.append([r["surp_cf_steps"]  [t0 + dt] for dt in window])
+
+    fact_mat = np.array(aligned_f)
+    cf_mat   = np.array(aligned_cf)
     mean_f,  std_f  = fact_mat.mean(0), fact_mat.std(0)
     mean_cf, std_cf = cf_mat.mean(0),   cf_mat.std(0)
-    xs = np.arange(n_steps)
-    t_tp = int(np.median([r["teleport_step"] for r in aap_results]))
+    xs = np.array(list(window))
 
     fig, ax = plt.subplots(figsize=(3.5, 2.7))
+
+    ax.axvline(0, color=_C["tp"], linestyle=":", lw=1.0, label="Teleport ($\\Delta t=0$)")
+    ax.axvspan(-0.5, 0.5, color=_C["tp"], alpha=0.06, linewidth=0)  # highlight event step
 
     ax.plot(xs, mean_f,  color=_C["blue"],   lw=1.4,
             label="Factual (blue room)")
@@ -619,12 +650,10 @@ def _plot_surprise_over_time(aap_results, out_dir, suffix=""):
     ax.fill_between(xs, mean_cf - std_cf, mean_cf + std_cf,
                     alpha=0.18, color=_C["orange"], linewidth=0)
 
-    ax.axvline(t_tp, color=_C["tp"], linestyle=":", lw=1.0,
-               label=f"Teleport ($t={t_tp}$)")
-
-    ax.set_xlabel("Prediction step")
+    ax.set_xlabel("Steps relative to teleport ($\\Delta t$)")
     ax.set_ylabel("MSE (surprise)")
     ax.set_xticks(xs)
+    ax.set_xticklabels([f"${x:+d}$" if x != 0 else "$0$" for x in xs])
     ax.legend(
         loc="upper center", bbox_to_anchor=(0.5, -0.18),
         ncol=3, fontsize=6.5,
