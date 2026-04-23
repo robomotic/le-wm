@@ -80,6 +80,7 @@ def collect(n_episodes: int, seed: int = 42) -> Path:
 
     cache = swm.data.utils.get_cache_dir()
     world = swm.World("swm/GlitchedHueTwoRoom-v1", num_envs=4, image_shape=(224, 224))
+    world.set_policy(swm.policy.RandomPolicy(seed=seed))
 
     half = n_episodes // 2
 
