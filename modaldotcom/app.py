@@ -82,6 +82,7 @@ image = (
         "huggingface_hub",
         "scikit-learn",
         "matplotlib",
+        "hdf5plugin",   # HDF5 compression plugins (LZ4, blosc, zstd…) needed to read swm datasets
     )
     # Copy the local le-wm repo (train.py, eval.py, jepa.py, module.py,
     # utils.py, config/) into the container image at build time.

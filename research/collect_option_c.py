@@ -54,6 +54,12 @@ def _merge(path_a: Path, path_b: Path, out: Path) -> None:
     Uses chunked I/O so that large datasets (e.g. pixels) are never fully
     loaded into RAM — only _CHUNK frames at a time are held in memory.
     """
+    try:
+        import hdf5plugin  # registers LZ4/blosc/zstd filters used by swm datasets
+        _ = hdf5plugin  # suppress unused-import warning
+    except ImportError:
+        pass  # not available locally; Modal image has it
+
     with h5py.File(path_a, "r") as fa, \
          h5py.File(path_b, "r") as fb, \
          h5py.File(out, "w") as fo:
