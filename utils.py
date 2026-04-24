@@ -47,7 +47,10 @@ def detect_teleport_bbox(dataset_path: str, n_samples: int = 100) -> tuple:
         ).mean(axis=0)
 
     delta = _bright(tp_frames) - _bright(ctrl_frames)
-    marker_mask = delta > 0.5
+    # Relative threshold: robust when ~50% of control frames are in the teleport-enabled
+    # room (marker also visible there), which pushes the absolute delta near 0.5.
+    threshold = max(0.1, float(delta.max()) * 0.5)
+    marker_mask = delta > threshold
 
     rows = np.where(marker_mask.any(axis=1))[0]
     cols = np.where(marker_mask.any(axis=0))[0]

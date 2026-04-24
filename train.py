@@ -56,8 +56,8 @@ def lejepa_forward(self, batch, stage, cfg):
 
     # LeWM loss
     output["pred_loss"] = (pred_emb - tgt_emb).pow(2).mean()
-    output["sigreg_loss"]= self.sigreg(emb.transpose(0, 1))
-    output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]  
+    output["sigreg_loss"] = self.sigreg(emb.transpose(0, 1))
+    output["loss"] = output["pred_loss"] + lambd * output["sigreg_loss"]
 
     losses_dict = {f"{stage}/{k}": v.detach() for k, v in output.items() if "loss" in k}
     self.log_dict(losses_dict, on_step=True, sync_dist=True)
@@ -102,9 +102,9 @@ def run(cfg):
         dataset, lengths=[cfg.train_split, 1 - cfg.train_split], generator=rnd_gen
     )
 
-    train = torch.utils.data.DataLoader(train_set, **cfg.loader,shuffle=True, drop_last=True, generator=rnd_gen)
+    train = torch.utils.data.DataLoader(train_set, **cfg.loader, shuffle=True, drop_last=True, generator=rnd_gen)
     val = torch.utils.data.DataLoader(val_set, **cfg.loader, shuffle=False, drop_last=False)
-    
+
     ##############################
     ##       model / optim      ##
     ##############################

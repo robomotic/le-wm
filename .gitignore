@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+.venv/
+venv/
+
+# Hydra outputs
+outputs/
+
+# Weights & Biases local artifacts
+wandb/
+
+# Secrets
+.env
+
+# Editor
+.vscode/
+.idea/
+*.swp

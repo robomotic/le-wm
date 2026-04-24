@@ -1,26 +1,58 @@
 """Modal app for running LeWM training and evaluation on cloud GPUs.
 
-The dataset is pre-loaded in the 'swm-cache' Modal volume (priamai-team workspace).
+The GlitchedHueTwoRoom dataset lives in the 'swm-cache' Modal volume
+(priamai-team workspace).  All causal ladder experiments are run via
+the --do-causal-test flag; see the runbook below.
 
-Usage
------
-# Training (100 epochs, logs to W&B lewm-causality / paoloai-robomotic)
-modal run modaldotcom/app.py --do-train
+Causal Ladder Runbook
+---------------------
+Baseline — train the default model, then run the AAP causal test:
 
-# Training with overrides
-modal run modaldotcom/app.py --do-train --max-epochs 50 --no-wandb
+    modal run modaldotcom/app.py --do-train
+    modal run modaldotcom/app.py --do-causal-test --policy <job_id>/lewm_epoch_50
 
-# Option B — train with teleport patch masking (p=0.5)
-modal run modaldotcom/app.py --do-train --mask-teleport-prob 0.5
+Option A — test-time pixel masking (Ladder 1 → 2 boundary):
+    Hide the teleport marker at inference to force the model to rely on
+    whatever latent representation it built from context.
 
-# Evaluation  (use the job_id printed at the end of training)
-modal run modaldotcom/app.py --do-eval --policy <job_id>/lewm_epoch_100
+    modal run modaldotcom/app.py --do-causal-test \\
+        --policy lewm_epoch_50 --mask-causal-test
 
-# Smoke test (1 epoch, no W&B)
-modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb
+Option B — training-time pixel masking (forces latent causal inference):
+    Retrain with 50% patch-masking probability so the model cannot memorise
+    the direct pixel cue, then evaluate with the pixel fully masked.
 
-# Causal test (Step 3 — AAP pipeline, logs causal/* metrics + plots to W&B)
-modal run modaldotcom/app.py --do-causal-test --policy <job_id>/lewm_epoch_50
+    modal run modaldotcom/app.py --do-train --mask-teleport-prob 0.5
+    modal run modaldotcom/app.py --do-causal-test \\
+        --policy <job_id>/lewm_epoch_50 --mask-causal-test
+
+Option C — reversed-confound dataset (decouples hue from teleport at data level):
+    Collect a held-out dataset where blue rooms have teleport DISABLED and
+    green rooms have teleport ENABLED — the opposite of the training confound.
+    Evaluate the original model on this reversed dataset, with and without masking.
+
+    modal run modaldotcom/app.py --do-collect-optionc
+    modal run modaldotcom/app.py --do-causal-test \\
+        --policy lewm_epoch_50 --dataset-name glitched_hue_optionc
+    modal run modaldotcom/app.py --do-causal-test \\
+        --policy lewm_epoch_50 --dataset-name glitched_hue_optionc --mask-causal-test
+
+SIGReg ablation — prove SIGReg is responsible for hue/position disentanglement:
+    Same as Option B but with the isotropic Gaussian regulariser disabled (λ=0).
+    If structural invariance error rises, SIGReg is causal for the ICM property.
+
+    modal run modaldotcom/app.py --do-train \\
+        --mask-teleport-prob 0.5 --sigreg-weight 0.0 --max-epochs 50 --no-wandb
+    modal run modaldotcom/app.py --do-causal-test \\
+        --policy <ablation_job_id>/lewm_epoch_50 --mask-causal-test
+
+Other commands
+--------------
+    modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb   # smoke test
+    modal run modaldotcom/app.py --do-eval --policy <job_id>/lewm_epoch_100
+    modal run modaldotcom/app.py --do-stats
+    modal run modaldotcom/app.py --do-inspect --dataset-name glitched_hue_optionc
+    modal run modaldotcom/app.py --do-audit  --dataset-name glitched_hue_tworoom_half
 """
 
 import subprocess
@@ -131,6 +163,7 @@ def train(
     max_epochs: int = 100,
     wandb_enabled: bool = True,
     mask_teleport_prob: float = 0.0,
+    sigreg_weight: float = 0.09,
 ) -> str:
     """Run train.py on a cloud A10G and persist checkpoints to the volume.
 
@@ -154,6 +187,8 @@ def train(
             "augmentation.teleport_patch_mask.enabled=True",
             f"augmentation.teleport_patch_mask.mask_probability={mask_teleport_prob}",
         ]
+    if sigreg_weight != 0.09:
+        cmd.append(f"loss.sigreg.weight={sigreg_weight}")
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, cwd="/workspace")
 
@@ -183,6 +218,70 @@ def train(
 
 
 # ---------------------------------------------------------------------------
+# Dataset audit — room colour + teleport breakdown (no GPU)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={CACHE_DIR: volume},
+    env=ENV,
+    timeout=300,
+)
+def audit_dataset(name: str = "glitched_hue_tworoom_half") -> None:
+    """Print room-colour and teleport-event breakdown for an HDF5 dataset.
+
+    Background colour is inferred from a background pixel (row=40, col=30)
+    when variation.background.color is not stored in the file.
+    """
+    import h5py
+    import hdf5plugin  # noqa: F401 — registers LZ4/blosc filters
+    import numpy as np
+
+    volume.reload()
+    path = f"{CACHE_DIR}/{name}.h5"
+    print(f"\nAudit: {path}\n{'='*60}")
+
+    with h5py.File(path, "r") as f:
+        tp     = f["teleported"][:]
+        ep_len = f["ep_len"][:]
+        ep_off = f["ep_offset"][:]
+
+        has_bg_color = "variation.background.color" in f
+        if has_bg_color:
+            bg = f["variation.background.color"][ep_off.tolist()]  # (E, 3)
+        else:
+            bg = f["pixels"][ep_off.tolist(), 40, 30, :]           # (E, 3) inferred
+
+    n_ep = len(ep_len)
+    is_blue  = (bg[:, 2].astype(int) - bg[:, 1].astype(int)) > 50
+    is_green = (bg[:, 1].astype(int) - bg[:, 2].astype(int)) > 50
+
+    tp_per_ep = np.zeros(n_ep, dtype=int)
+    for i in range(n_ep):
+        s, e = int(ep_off[i]), int(ep_off[i]) + int(ep_len[i])
+        tp_per_ep[i] = int(tp[s:e].sum())
+    has_tp = tp_per_ep > 0
+
+    src = "stored" if has_bg_color else "inferred from pixel"
+    print(f"Room colour source : {src}")
+    print(f"Total episodes     : {n_ep}")
+    print(f"Total steps        : {len(tp)}")
+    print(f"Teleport steps     : {int(tp.sum())}")
+    print()
+    print(f"Blue  episodes : {int(is_blue.sum()):>6}  ({100*is_blue.mean():.1f}%)")
+    print(f"Green episodes : {int(is_green.sum()):>6}  ({100*is_green.mean():.1f}%)")
+    print(f"Other/mixed    : {int(n_ep - is_blue.sum() - is_green.sum()):>6}")
+    print()
+    print(f"Episodes WITH teleport    : {int(has_tp.sum()):>6}")
+    print(f"  of which blue           : {int((has_tp & is_blue).sum()):>6}")
+    print(f"  of which green          : {int((has_tp & is_green).sum()):>6}")
+    print()
+    print(f"Episodes WITHOUT teleport : {int((~has_tp).sum()):>6}")
+    print(f"  of which blue           : {int((~has_tp & is_blue).sum()):>6}")
+    print(f"  of which green          : {int((~has_tp & is_green).sum()):>6}")
+    print(f"{'='*60}\n")
+
+
 # Dataset inspection function (no GPU — reads HDF5 from volume)
 # ---------------------------------------------------------------------------
 
@@ -505,6 +604,7 @@ def main(
     do_inspect: bool = False,
     do_collect_optionc: bool = False,
     do_remerge_optionc: bool = False,
+    do_audit: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
@@ -514,6 +614,7 @@ def main(
     dataset_name: str = "glitched_hue_tworoom_half",
     mask_causal_test: bool = False,
     mask_teleport_prob: float = 0.0,
+    sigreg_weight: float = 0.09,
     optionc_episodes: int = 5000,
 ) -> None:
     """Orchestrate training and/or evaluation on Modal.
@@ -539,6 +640,10 @@ def main(
     modal run modaldotcom/app.py --do-train --mask-teleport-prob 0.5
     modal run modaldotcom/app.py --do-causal-test --policy <new_job_id>/lewm_epoch_100 --mask-causal-test
 
+    # SIGReg ablation — same as Option B but with SIGReg disabled (λ=0)
+    modal run modaldotcom/app.py --do-train --mask-teleport-prob 0.5 --sigreg-weight 0.0 --max-epochs 50 --no-wandb
+    modal run modaldotcom/app.py --do-causal-test --policy <ablation_job_id>/lewm_epoch_50 --mask-causal-test
+
     # Option C — collect reversed-confound dataset then run causal test on it
     modal run modaldotcom/app.py --do-collect-optionc
     modal run modaldotcom/app.py --do-inspect --dataset-name glitched_hue_optionc
@@ -555,7 +660,7 @@ def main(
     # Stats for a specific run
     modal run modaldotcom/app.py --do-stats --run-id 80aovwgh
     """
-    if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect, do_collect_optionc, do_remerge_optionc]):
+    if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect, do_collect_optionc, do_remerge_optionc, do_audit]):
         print("Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, --do-inspect, and/or --do-collect-optionc.")
         return
 
@@ -566,6 +671,7 @@ def main(
             max_epochs=max_epochs,
             wandb_enabled=not no_wandb,
             mask_teleport_prob=mask_teleport_prob,
+            sigreg_weight=sigreg_weight,
         )
         # If the user also requested eval in the same invocation, chain it.
         if do_eval and not policy and policy_path:
@@ -604,3 +710,6 @@ def main(
 
     if do_inspect:
         inspect_dataset.remote(name=dataset_name)
+
+    if do_audit:
+        audit_dataset.remote(name=dataset_name)

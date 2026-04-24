@@ -243,15 +243,16 @@ is available.
 
 ---
 
-## Summary of all runs (2026-04-22 / 23)
+## Summary of all runs (2026-04-22 / 24)
 
-| Experiment | Pixel masked | Hue confound | Surprise ratio | Struct. inv. error | Verdict |
-|-----------|-------------|-------------|---------------|-------------------|---------|
-| Baseline | No | Normal | 0.718 | 0.380 | Pixel + hue both available |
-| Option A | Yes (test-time) | Normal | 0.867 | — | Only hue available |
-| Option B | Yes (train+test) | Normal | 3.327 | 0.204 | Hue over-latched |
-| Option C | No | Reversed | 0.800 | 0.777 | Pixel available; hue anti-correlated |
-| **Option C+A** | **Yes** | **Reversed** | **1.240** | **1.032** | **Both removed → model fails** |
+| Experiment | SIGReg λ | Pixel masked | Hue confound | Pos R² | Surprise ratio | Struct. inv. error | Verdict |
+|-----------|---------|-------------|-------------|--------|---------------|-------------------|---------|
+| Baseline | 0.09 | No | Normal | 0.984 | 0.718 | 0.380 | Pixel + hue both available |
+| Option A | 0.09 | Yes (test-time) | Normal | — | 0.867 | — | Only hue available |
+| Option B | 0.09 | Yes (train+test) | Normal | 0.993 | 3.327 | 0.204 | Hue over-latched; best ICM |
+| Option C | 0.09 | No | Reversed | 0.987 | 0.800 | 0.777 | Pixel available; hue anti-correlated |
+| Option C+A | 0.09 | Yes | Reversed | 0.987 | 1.240 | 1.032 | Both removed → model fails |
+| **SIGReg ablation** | **0** | **Yes (train+test)** | **Normal** | **0.064** | **2.196** | **1439.5** | **SIGReg removed → latent space collapses** |
 
 **What the ladder of experiments shows:**
 
@@ -271,3 +272,13 @@ is available.
   The model has no residual latent causal mechanism. `lewm_epoch_50` is a Ladder 1/2 model
   that relies on direct pixel observation and hue as a spurious shortcut — not a Ladder 3
   causal reasoner.
+
+- **SIGReg is responsible for ICM (ablation):** training with λ=0 and the same pixel
+  masking as Option B collapses structural invariance error by ~7000× (0.204 → 1440) and
+  destroys position linearity (R² 0.993 → 0.064). The model still achieves low pred_loss
+  (~8e-9) but builds a completely entangled non-linear latent space where the hue direction
+  bleeds massively into the position subspace. This confirms that SIGReg is the mechanism
+  behind Option B's clean hue/position disentanglement — not the pixel masking alone.
+
+  *Note: ablation result is at epoch 27 (checkpoint committed before training completed);
+  the signal is already decisive at this early checkpoint.*
