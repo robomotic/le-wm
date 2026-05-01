@@ -164,6 +164,7 @@ def train(
     wandb_enabled: bool = True,
     mask_teleport_prob: float = 0.0,
     sigreg_weight: float = 0.09,
+    seed: int = 3072,
 ) -> str:
     """Run train.py on a cloud A10G and persist checkpoints to the volume.
 
@@ -189,6 +190,8 @@ def train(
         ]
     if sigreg_weight != 0.09:
         cmd.append(f"loss.sigreg.weight={sigreg_weight}")
+    if seed != 3072:
+        cmd.append(f"seed={seed}")
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, cwd="/workspace")
 
@@ -545,6 +548,7 @@ def causal_test(
     no_wandb: bool = False,
     mask_teleport: bool = False,
     dataset_name: str = "glitched_hue_tworoom_half",
+    n_aap_episodes: int = 200,
 ) -> str:
     """Run research/glitched_hue_experiment.py on a cloud A10G (Step 3 of runme.md).
 
@@ -578,6 +582,8 @@ def causal_test(
         cmd.append("--mask-teleport")
     if dataset_name != "glitched_hue_tworoom_half":
         cmd += ["--dataset-name", dataset_name]
+    if n_aap_episodes != 200:
+        cmd += ["--n-aap-episodes", str(n_aap_episodes)]
 
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, cwd="/workspace")
@@ -589,6 +595,140 @@ def causal_test(
     results_file = f"{CACHE_DIR}/{os.path.dirname(policy)}/causal_test{suffix}_results.json"
     print(f"\n✅ Causal test complete. Results: {results_file}")
     return results_file
+
+
+# ---------------------------------------------------------------------------
+# Statistical study — 3 seeds × 3 conditions, fully parallel
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={CACHE_DIR: volume},
+    secrets=[wandb_secret],
+    env=ENV,
+    timeout=86400,   # 24 h ceiling — covers all parallel training + tests
+)
+def run_statistical_study(
+    max_epochs: int = 50,
+    n_aap_episodes: int = 200,
+    seeds: list = None,
+) -> dict:
+    """Full parallel statistical study: 3 seeds × 3 conditions.
+
+    Reuses existing seed-3072 checkpoints for Baseline and Option B.
+    Spawns all new training runs simultaneously, then spawns all causal
+    tests simultaneously. Returns aggregated mean ± std per condition.
+    """
+    import json
+    import numpy as np
+    from pathlib import Path
+
+    if seeds is None:
+        seeds = [3072, 1234, 5678]
+
+    # Existing checkpoints (seed 3072) — no retraining needed.
+    EXISTING = {
+        ("baseline", 3072): "lewm_epoch_50",
+        ("option_b",  3072): "ts_1776884938/lewm_epoch_50",
+    }
+
+    # Determine which (condition, seed) pairs need fresh training.
+    to_train = []
+    for seed in seeds:
+        if ("baseline", seed) not in EXISTING:
+            to_train.append(("baseline", seed, 0.0, 0.09))
+        if ("option_b", seed) not in EXISTING:
+            to_train.append(("option_b", seed, 0.5, 0.09))
+        to_train.append(("ablation", seed, 0.5, 0.0))
+
+    # Phase 1 — spawn all training runs in parallel.
+    print(f"Spawning {len(to_train)} training runs in parallel …")
+    train_handles = {}
+    for (cond, seed, mask_prob, sigreg) in to_train:
+        h = train.spawn(
+            max_epochs=max_epochs,
+            wandb_enabled=False,
+            mask_teleport_prob=mask_prob,
+            sigreg_weight=sigreg,
+            seed=seed,
+        )
+        train_handles[(cond, seed)] = h
+
+    policy_paths = dict(EXISTING)
+    for (cond, seed), handle in train_handles.items():
+        policy_paths[(cond, seed)] = handle.get()
+        print(f"  ✓ {cond} seed={seed}  →  {policy_paths[(cond, seed)]}")
+
+    # Phase 2 — spawn all causal tests in parallel.
+    TEST_VARIANTS = {
+        "baseline": dict(mask_teleport=False, dataset_name="glitched_hue_tworoom_half"),
+        "option_b": dict(mask_teleport=True,  dataset_name="glitched_hue_tworoom_half"),
+        "ablation": dict(mask_teleport=True,  dataset_name="glitched_hue_tworoom_half"),
+    }
+
+    print("Spawning causal tests in parallel …")
+    test_handles = {}
+    for (cond, seed), policy in policy_paths.items():
+        variant = TEST_VARIANTS.get(cond)
+        if variant is None:
+            continue
+        h = causal_test.spawn(
+            policy=policy,
+            no_wandb=True,
+            n_aap_episodes=n_aap_episodes,
+            **variant,
+        )
+        test_handles[(cond, seed)] = h
+
+    # Option C and C+A use the baseline seed-3072 checkpoint on the reversed dataset.
+    for ds_cond, mask in [("option_c", False), ("option_ca", True)]:
+        h = causal_test.spawn(
+            policy=EXISTING[("baseline", 3072)],
+            no_wandb=True,
+            n_aap_episodes=n_aap_episodes,
+            mask_teleport=mask,
+            dataset_name="glitched_hue_optionc",
+        )
+        test_handles[(ds_cond, 3072)] = h
+
+    result_files = {}
+    for key, handle in test_handles.items():
+        result_files[key] = handle.get()
+        print(f"  ✓ causal test {key}  →  {result_files[key]}")
+
+    # Phase 3 — aggregate across seeds.
+    volume.reload()
+    aggregated = {}
+    for cond in ["baseline", "option_b", "ablation", "option_c", "option_ca"]:
+        cond_results = []
+        for key, fpath in result_files.items():
+            if key[0] != cond:
+                continue
+            with open(fpath) as f:
+                data = json.load(f)
+            cond_results.append(data["metrics"])
+
+        if not cond_results:
+            continue
+
+        agg = {}
+        for metric in cond_results[0]:
+            if metric == "per_episode_ratios":
+                continue
+            vals = [r[metric] for r in cond_results if isinstance(r.get(metric), (int, float))]
+            if vals:
+                agg[metric + "_mean"] = float(np.mean(vals))
+                agg[metric + "_std"]  = float(np.std(vals))
+        agg["n_seeds"] = len(cond_results)
+        aggregated[cond] = agg
+
+    out_path = Path(CACHE_DIR) / "statistical_study_results.json"
+    with open(out_path, "w") as f:
+        json.dump({"seeds": seeds, "n_aap_episodes": n_aap_episodes,
+                   "conditions": aggregated}, f, indent=2)
+    volume.commit()
+    print(f"\n✅ Aggregated results → {out_path}")
+    return aggregated
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +745,7 @@ def main(
     do_collect_optionc: bool = False,
     do_remerge_optionc: bool = False,
     do_audit: bool = False,
+    do_statistical_study: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
@@ -616,6 +757,9 @@ def main(
     mask_teleport_prob: float = 0.0,
     sigreg_weight: float = 0.09,
     optionc_episodes: int = 5000,
+    study_seeds: str = "3072,1234,5678",
+    study_epochs: int = 50,
+    study_n_aap: int = 200,
 ) -> None:
     """Orchestrate training and/or evaluation on Modal.
 
@@ -659,9 +803,20 @@ def main(
 
     # Stats for a specific run
     modal run modaldotcom/app.py --do-stats --run-id 80aovwgh
+
+    # Statistical study — 3 seeds × 3 conditions, all training runs in parallel (~7.5 h)
+    modal run modaldotcom/app.py --do-statistical-study
+    modal run modaldotcom/app.py --do-statistical-study --study-seeds 3072,1234,5678 --study-epochs 50 --study-n-aap 200
+
+    # Re-run only causal tests without retraining (after changing n_aap_episodes)
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --n-aap-episodes 200
     """
-    if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect, do_collect_optionc, do_remerge_optionc, do_audit]):
-        print("Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, --do-inspect, and/or --do-collect-optionc.")
+    if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect,
+                do_collect_optionc, do_remerge_optionc, do_audit, do_statistical_study]):
+        print(
+            "Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, "
+            "--do-inspect, --do-collect-optionc, or --do-statistical-study."
+        )
         return
 
     policy_path = policy
@@ -713,3 +868,15 @@ def main(
 
     if do_audit:
         audit_dataset.remote(name=dataset_name)
+
+    if do_statistical_study:
+        seeds = [int(s) for s in study_seeds.split(",")]
+        print(f"Launching statistical study: seeds={seeds}, epochs={study_epochs}, n_aap={study_n_aap}")
+        result = run_statistical_study.remote(
+            max_epochs=study_epochs,
+            n_aap_episodes=study_n_aap,
+            seeds=seeds,
+        )
+        print("\n=== Statistical Study Results ===")
+        import json
+        print(json.dumps(result, indent=2))

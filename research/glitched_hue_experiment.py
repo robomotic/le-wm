@@ -66,8 +66,8 @@ def main():
         help="DataLoader batches used to train the linear probes (default: 200)",
     )
     parser.add_argument(
-        "--n-aap-episodes", type=int, default=50,
-        help="Teleport episodes to average the AAP cycle over (default: 50)",
+        "--n-aap-episodes", type=int, default=200,
+        help="Teleport episodes to average the AAP cycle over (default: 200)",
     )
     parser.add_argument(
         "--mask-teleport", action="store_true",
@@ -149,19 +149,28 @@ def main():
     surp_fact  = float(np.mean([r["surprise_factual"]       for r in aap_results]))
     surp_cf    = float(np.mean([r["surprise_counterfactual"] for r in aap_results]))
     surp_ratio = surp_cf / (surp_fact + 1e-12)
+
+    per_ep_ratios = [
+        r["surprise_counterfactual"] / (r["surprise_factual"] + 1e-12)
+        for r in aap_results
+    ]
+    ratio_mean = float(np.mean(per_ep_ratios))
+    ratio_std  = float(np.std(per_ep_ratios))
+
     print(f"      Factual surprise:         {surp_fact:.6f}")
     print(f"      Counterfactual surprise:  {surp_cf:.6f}")
     print(f"      Surprise ratio (cf/fact): {surp_ratio:.4f}")
+    print(f"      Per-episode ratio:        {ratio_mean:.4f} ± {ratio_std:.4f}  (N={len(per_ep_ratios)})")
 
     # -------------------------------------------------------------------
     # Stage 4a — Structural invariance
     # -------------------------------------------------------------------
     print("\n[4a/5] Structural invariance ...")
-    inv_error = _structural_invariance(
+    inv_error, inv_error_std = _structural_invariance(
         jepa, loader, delta_hue, pos_dirs,
         mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
     )
-    print(f"       Invariance error: {inv_error:.6f}")
+    print(f"       Invariance error: {inv_error:.6f} ± {inv_error_std:.6f}")
 
     # -------------------------------------------------------------------
     # Stage 4b — AAP consistency advantage
@@ -179,15 +188,20 @@ def main():
     # Stage 5 — Report, save, visualise
     # -------------------------------------------------------------------
     metrics = {
-        "position_probe_r2":             pos_r2,
-        "hue_probe_accuracy":            hue_acc,
-        "surprise_factual":              surp_fact,
-        "surprise_counterfactual":       surp_cf,
-        "surprise_ratio":                surp_ratio,
-        "structural_invariance_error":   inv_error,
-        "aap_consistency_advantage":     aap_adv,
-        "aap_surprise_with_evidence":    surp_with,
-        "aap_surprise_without_evidence": surp_without,
+        "position_probe_r2":                  pos_r2,
+        "hue_probe_accuracy":                 hue_acc,
+        "surprise_factual":                   surp_fact,
+        "surprise_counterfactual":            surp_cf,
+        "surprise_ratio":                     ratio_mean,
+        "surprise_ratio_std":                 ratio_std,
+        "surprise_ratio_n_episodes":          len(per_ep_ratios),
+        "structural_invariance_error":        inv_error,
+        "structural_invariance_error_std":    inv_error_std,
+        "structural_invariance_n_batches":    30,
+        "aap_consistency_advantage":          aap_adv,
+        "aap_surprise_with_evidence":         surp_with,
+        "aap_surprise_without_evidence":      surp_without,
+        "per_episode_ratios":                 per_ep_ratios,
     }
 
     _print_report(metrics)
@@ -480,7 +494,7 @@ def _structural_invariance(jepa, loader, delta_hue, pos_dirs, n_batches=30,
         pos_cf   = z_cf @ pos_dirs.T
         errors.append((pos_fact - pos_cf).abs().mean().item())
 
-    return float(np.mean(errors))
+    return float(np.mean(errors)), float(np.std(errors))
 
 
 # ---------------------------------------------------------------------------
@@ -732,22 +746,32 @@ def _plot_latent_pca(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir
 # ---------------------------------------------------------------------------
 
 def _print_report(metrics):
-    print("\n" + "=" * 62)
+    print("\n" + "=" * 66)
     print("  CAUSAL DISENTANGLEMENT TEST — RESULTS")
-    print("=" * 62)
+    print("=" * 66)
+    skip = {"per_episode_ratios"}
     for k, v in metrics.items():
-        print(f"  {k:<44s}: {v:.6f}")
+        if k in skip:
+            continue
+        if isinstance(v, float):
+            print(f"  {k:<48s}: {v:.6f}")
+        else:
+            print(f"  {k:<48s}: {v}")
     print()
-    r = metrics["surprise_ratio"]
-    a = metrics["aap_consistency_advantage"]
-    e = metrics["structural_invariance_error"]
-    print(f"  Surprise ratio              {r:.4f}")
-    print(f"    log only — values near 1.0 suggest Ladder 3 behaviour")
+    r     = metrics["surprise_ratio"]
+    r_std = metrics.get("surprise_ratio_std", 0.0)
+    n     = metrics.get("surprise_ratio_n_episodes", "?")
+    a     = metrics["aap_consistency_advantage"]
+    e     = metrics["structural_invariance_error"]
+    e_std = metrics.get("structural_invariance_error_std", 0.0)
+    nb    = metrics.get("structural_invariance_n_batches", 30)
+    print(f"  Surprise ratio              {r:.4f} ± {r_std:.4f}   (N={n} episodes)")
+    print(f"    values near 1.0 suggest Ladder 3 behaviour")
     print(f"  AAP consistency advantage   {a:.4f}")
     print(f"    positive → factual evidence reduces uncertainty (Ladder 3)")
-    print(f"  Structural invariance error {e:.4f}")
+    print(f"  Structural invariance error {e:.4f} ± {e_std:.4f}   (N={nb} batches)")
     print(f"    near 0   → position dims orthogonal to hue (ICM)")
-    print("=" * 62)
+    print("=" * 66)
 
 
 def _log_to_wandb(metrics, ckpt_path, out_dir, suffix=""):
