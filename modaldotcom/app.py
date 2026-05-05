@@ -612,12 +612,14 @@ def run_statistical_study(
     max_epochs: int = 50,
     n_aap_episodes: int = 200,
     seeds: list = None,
+    batch_size: int = 4,
 ) -> dict:
     """Full parallel statistical study: 3 seeds × 3 conditions.
 
-    Reuses existing seed-3072 checkpoints for Baseline and Option B.
-    Spawns all new training runs simultaneously, then spawns all causal
-    tests simultaneously. Returns aggregated mean ± std per condition.
+    Spawns training and causal-test jobs in batches of `batch_size` to stay
+    within the 10-GPU workspace concurrency limit. Existing checkpoints from
+    prior runs are reused so no retraining is needed for them.
+    Returns aggregated mean ± std per condition.
     """
     import json
     import numpy as np
@@ -626,75 +628,98 @@ def run_statistical_study(
     if seeds is None:
         seeds = [3072, 1234, 5678]
 
-    # Existing checkpoints (seed 3072) — no retraining needed.
+    # Existing checkpoints — no retraining needed.
+    # Includes the 5 successfully completed runs from the first study attempt.
     EXISTING = {
         ("baseline", 3072): "lewm_epoch_50",
         ("option_b",  3072): "ts_1776884938/lewm_epoch_50",
+        ("ablation",  3072): "ts_1777735299/lewm_epoch_50",
+        ("option_b",  1234): "ts_1777735301/lewm_epoch_50",
+        ("option_b",  5678): "ts_1777735304/lewm_epoch_50",
+        ("ablation",  5678): "ts_1777735306/lewm_epoch_50",
     }
 
-    # Determine which (condition, seed) pairs need fresh training.
+    # Determine which (condition, seed) pairs still need fresh training.
     to_train = []
     for seed in seeds:
-        if ("baseline", seed) not in EXISTING:
-            to_train.append(("baseline", seed, 0.0, 0.09))
-        if ("option_b", seed) not in EXISTING:
-            to_train.append(("option_b", seed, 0.5, 0.09))
-        to_train.append(("ablation", seed, 0.5, 0.0))
-
-    # Phase 1 — spawn all training runs in parallel.
-    print(f"Spawning {len(to_train)} training runs in parallel …")
-    train_handles = {}
-    for (cond, seed, mask_prob, sigreg) in to_train:
-        h = train.spawn(
-            max_epochs=max_epochs,
-            wandb_enabled=False,
-            mask_teleport_prob=mask_prob,
-            sigreg_weight=sigreg,
-            seed=seed,
-        )
-        train_handles[(cond, seed)] = h
+        for cond, mask_prob, sigreg in [
+            ("baseline", 0.0, 0.09),
+            ("option_b", 0.5, 0.09),
+            ("ablation", 0.5, 0.0),
+        ]:
+            if (cond, seed) not in EXISTING:
+                to_train.append((cond, seed, mask_prob, sigreg))
 
     policy_paths = dict(EXISTING)
-    for (cond, seed), handle in train_handles.items():
-        policy_paths[(cond, seed)] = handle.get()
-        print(f"  ✓ {cond} seed={seed}  →  {policy_paths[(cond, seed)]}")
 
-    # Phase 2 — spawn all causal tests in parallel.
+    def _spawn_and_collect_training(batch):
+        """Spawn one batch of training jobs and block until all complete."""
+        handles = {}
+        for (cond, seed, mask_prob, sigreg) in batch:
+            print(f"  spawning train: {cond} seed={seed} mask={mask_prob} sigreg={sigreg}")
+            h = train.spawn(
+                max_epochs=max_epochs,
+                wandb_enabled=False,
+                mask_teleport_prob=mask_prob,
+                sigreg_weight=sigreg,
+                seed=seed,
+            )
+            handles[(cond, seed)] = h
+        for (cond, seed, *_), handle in zip(batch, handles.values()):
+            try:
+                path = handle.get()
+                policy_paths[(cond, seed)] = path
+                print(f"  ✓ {cond} seed={seed}  →  {path}")
+            except Exception as e:
+                print(f"  ✗ {cond} seed={seed} FAILED: {e}")
+
+    # Phase 1 — train in batches to respect the 10-GPU limit.
+    print(f"Phase 1: {len(to_train)} training run(s) needed, batch_size={batch_size}")
+    for i in range(0, len(to_train), batch_size):
+        batch = to_train[i:i + batch_size]
+        print(f"  batch {i // batch_size + 1}/{-(-len(to_train) // batch_size)}: {[(c,s) for c,s,*_ in batch]}")
+        _spawn_and_collect_training(batch)
+
+    # Phase 2 — spawn causal tests in batches.
     TEST_VARIANTS = {
         "baseline": dict(mask_teleport=False, dataset_name="glitched_hue_tworoom_half"),
         "option_b": dict(mask_teleport=True,  dataset_name="glitched_hue_tworoom_half"),
         "ablation": dict(mask_teleport=True,  dataset_name="glitched_hue_tworoom_half"),
     }
 
-    print("Spawning causal tests in parallel …")
-    test_handles = {}
+    # Build the full list of (key, policy, kwargs) causal tests to run.
+    causal_todo = []
     for (cond, seed), policy in policy_paths.items():
         variant = TEST_VARIANTS.get(cond)
         if variant is None:
             continue
-        h = causal_test.spawn(
-            policy=policy,
-            no_wandb=True,
-            n_aap_episodes=n_aap_episodes,
-            **variant,
-        )
-        test_handles[(cond, seed)] = h
-
-    # Option C and C+A use the baseline seed-3072 checkpoint on the reversed dataset.
+        causal_todo.append(((cond, seed), policy, variant))
+    # Option C and C+A use the baseline seed-3072 checkpoint.
+    baseline_3072 = EXISTING[("baseline", 3072)]
     for ds_cond, mask in [("option_c", False), ("option_ca", True)]:
-        h = causal_test.spawn(
-            policy=EXISTING[("baseline", 3072)],
-            no_wandb=True,
-            n_aap_episodes=n_aap_episodes,
-            mask_teleport=mask,
-            dataset_name="glitched_hue_optionc",
+        causal_todo.append(
+            ((ds_cond, 3072), baseline_3072,
+             dict(mask_teleport=mask, dataset_name="glitched_hue_optionc"))
         )
-        test_handles[(ds_cond, 3072)] = h
 
+    print(f"\nPhase 2: {len(causal_todo)} causal test(s), batch_size={batch_size}")
     result_files = {}
-    for key, handle in test_handles.items():
-        result_files[key] = handle.get()
-        print(f"  ✓ causal test {key}  →  {result_files[key]}")
+    for i in range(0, len(causal_todo), batch_size):
+        batch = causal_todo[i:i + batch_size]
+        print(f"  batch {i // batch_size + 1}/{-(-len(causal_todo) // batch_size)}: {[k for k,*_ in batch]}")
+        handles = {}
+        for (key, policy, kwargs) in batch:
+            h = causal_test.spawn(
+                policy=policy, no_wandb=True, n_aap_episodes=n_aap_episodes, **kwargs
+            )
+            handles[key] = h
+        for key, handle in handles.items():
+            try:
+                fpath = handle.get()
+                result_files[key] = fpath
+                print(f"  ✓ causal test {key}  →  {fpath}")
+            except Exception as e:
+                print(f"  ✗ causal test {key} FAILED: {e}")
 
     # Phase 3 — aggregate across seeds.
     volume.reload()
@@ -704,11 +729,15 @@ def run_statistical_study(
         for key, fpath in result_files.items():
             if key[0] != cond:
                 continue
-            with open(fpath) as f:
-                data = json.load(f)
-            cond_results.append(data["metrics"])
+            try:
+                with open(fpath) as f:
+                    data = json.load(f)
+                cond_results.append(data["metrics"])
+            except Exception as e:
+                print(f"  warning: could not read {fpath}: {e}")
 
         if not cond_results:
+            print(f"  warning: no results for condition '{cond}' — skipping")
             continue
 
         agg = {}
@@ -721,6 +750,7 @@ def run_statistical_study(
                 agg[metric + "_std"]  = float(np.std(vals))
         agg["n_seeds"] = len(cond_results)
         aggregated[cond] = agg
+        print(f"  {cond}: n_seeds={len(cond_results)}, ratio={agg.get('surprise_ratio_mean', '?'):.4f}")
 
     out_path = Path(CACHE_DIR) / "statistical_study_results.json"
     with open(out_path, "w") as f:
