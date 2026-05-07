@@ -172,16 +172,19 @@ def train(
     """
     import glob
     import os
-
     import time
-    run_ts = str(int(time.time()))
+    import uuid
+
+    # Append a short UUID to prevent subdir collisions when multiple containers
+    # start within the same second (common when jobs are spawned in parallel).
+    run_id = f"ts_{int(time.time())}_{uuid.uuid4().hex[:6]}"
 
     cmd = [
         "python", "train.py",
         f"data={data}",
         f"trainer.max_epochs={max_epochs}",
         f"wandb.enabled={'True' if wandb_enabled else 'False'}",
-        f"subdir=ts_{run_ts}",
+        f"subdir={run_id}",
     ]
     if mask_teleport_prob > 0.0:
         cmd += [
@@ -629,14 +632,22 @@ def run_statistical_study(
         seeds = [3072, 1234, 5678]
 
     # Existing checkpoints — no retraining needed.
-    # Includes the 5 successfully completed runs from the first study attempt.
+    # option_b seeds 1234/5678 are intentionally absent: their prior 50-epoch
+    # runs are insufficient; option_b always trains for 100 epochs.
     EXISTING = {
         ("baseline", 3072): "lewm_epoch_50",
-        ("option_b",  3072): "ts_1776884938/lewm_epoch_50",
+        ("option_b",  3072): "ts_1776884938/lewm_epoch_50",   # 100 epochs
         ("ablation",  3072): "ts_1777735299/lewm_epoch_50",
-        ("option_b",  1234): "ts_1777735301/lewm_epoch_50",
-        ("option_b",  5678): "ts_1777735304/lewm_epoch_50",
+        ("baseline",  1234): "ts_1777994910/lewm_epoch_50",
+        ("baseline",  5678): "ts_1777991006/lewm_epoch_50",
         ("ablation",  5678): "ts_1777735306/lewm_epoch_50",
+    }
+
+    # Per-condition epoch counts: option_b needs 100 epochs to converge.
+    COND_EPOCHS = {
+        "baseline": max_epochs,
+        "option_b": 100,
+        "ablation": max_epochs,
     }
 
     # Determine which (condition, seed) pairs still need fresh training.
@@ -648,17 +659,17 @@ def run_statistical_study(
             ("ablation", 0.5, 0.0),
         ]:
             if (cond, seed) not in EXISTING:
-                to_train.append((cond, seed, mask_prob, sigreg))
+                to_train.append((cond, seed, mask_prob, sigreg, COND_EPOCHS[cond]))
 
     policy_paths = dict(EXISTING)
 
     def _spawn_and_collect_training(batch):
         """Spawn one batch of training jobs and block until all complete."""
         handles = {}
-        for (cond, seed, mask_prob, sigreg) in batch:
-            print(f"  spawning train: {cond} seed={seed} mask={mask_prob} sigreg={sigreg}")
+        for (cond, seed, mask_prob, sigreg, epochs) in batch:
+            print(f"  spawning train: {cond} seed={seed} mask={mask_prob} sigreg={sigreg} epochs={epochs}")
             h = train.spawn(
-                max_epochs=max_epochs,
+                max_epochs=epochs,
                 wandb_enabled=False,
                 mask_teleport_prob=mask_prob,
                 sigreg_weight=sigreg,
@@ -677,7 +688,7 @@ def run_statistical_study(
     print(f"Phase 1: {len(to_train)} training run(s) needed, batch_size={batch_size}")
     for i in range(0, len(to_train), batch_size):
         batch = to_train[i:i + batch_size]
-        print(f"  batch {i // batch_size + 1}/{-(-len(to_train) // batch_size)}: {[(c,s) for c,s,*_ in batch]}")
+        print(f"  batch {i // batch_size + 1}/{-(-len(to_train) // batch_size)}: {[(c, s, e) for c, s, _, __, e in batch]}")
         _spawn_and_collect_training(batch)
 
     # Phase 2 — spawn causal tests in batches.
