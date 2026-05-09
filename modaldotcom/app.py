@@ -639,7 +639,10 @@ def run_statistical_study(
         ("option_b",  3072): "ts_1776884938/lewm_epoch_50",   # 100 epochs
         ("ablation",  3072): "ts_1777735299/lewm_epoch_50",
         ("baseline",  1234): "ts_1777994910/lewm_epoch_50",
+        ("option_b",  1234): "ts_1778145022_93c1c4/lewm_epoch_91",  # 91 epochs (~converged)
+        ("ablation",  1234): "ts_1778145024_04e194/lewm_epoch_50",
         ("baseline",  5678): "ts_1777991006/lewm_epoch_50",
+        ("option_b",  5678): "ts_1778145025_368123/lewm_epoch_90",  # 90 epochs (~converged)
         ("ablation",  5678): "ts_1777735306/lewm_epoch_50",
     }
 
