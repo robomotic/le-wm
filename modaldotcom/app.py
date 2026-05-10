@@ -916,11 +916,12 @@ def main(
     if do_statistical_study:
         seeds = [int(s) for s in study_seeds.split(",")]
         print(f"Launching statistical study: seeds={seeds}, epochs={study_epochs}, n_aap={study_n_aap}")
-        result = run_statistical_study.remote(
+        # Use .spawn() so the orchestrator runs independently of the local process.
+        # This means the study continues even if the local terminal disconnects.
+        handle = run_statistical_study.spawn(
             max_epochs=study_epochs,
             n_aap_episodes=study_n_aap,
             seeds=seeds,
         )
-        print("\n=== Statistical Study Results ===")
-        import json
-        print(json.dumps(result, indent=2))
+        print(f"Statistical study running as function call: {handle.object_id}")
+        print("Results will be written to swm-cache/statistical_study_results.json when done.")
