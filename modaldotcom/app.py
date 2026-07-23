@@ -46,6 +46,14 @@ SIGReg ablation — prove SIGReg is responsible for hue/position disentanglement
     modal run modaldotcom/app.py --do-causal-test \\
         --policy <ablation_job_id>/lewm_epoch_50 --mask-causal-test
 
+Theme C — validate the hue intervention itself (on-manifold + single-factor checks):
+    No retraining. Adds (A) an on-manifold check comparing z_cf against a
+    random-direction negative control, and (B) InvErr probes for extra
+    decodable factors (teleported, step_idx, distance_to_target).
+
+    modal run modaldotcom/app.py --do-causal-test \\
+        --policy lewm_epoch_50 --extended-validation
+
 Other commands
 --------------
     modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb   # smoke test
@@ -552,6 +560,7 @@ def causal_test(
     mask_teleport: bool = False,
     dataset_name: str = "glitched_hue_tworoom_half",
     n_aap_episodes: int = 200,
+    extended_validation: bool = False,
 ) -> str:
     """Run research/glitched_hue_experiment.py on a cloud A10G (Step 3 of runme.md).
 
@@ -587,6 +596,8 @@ def causal_test(
         cmd += ["--dataset-name", dataset_name]
     if n_aap_episodes != 200:
         cmd += ["--n-aap-episodes", str(n_aap_episodes)]
+    if extended_validation:
+        cmd.append("--extended-validation")
 
     print(f"Running: {' '.join(cmd)}")
     subprocess.run(cmd, check=True, cwd="/workspace")
@@ -798,6 +809,7 @@ def main(
     no_wandb: bool = False,
     dataset_name: str = "glitched_hue_tworoom_half",
     mask_causal_test: bool = False,
+    extended_validation: bool = False,
     mask_teleport_prob: float = 0.0,
     sigreg_weight: float = 0.09,
     optionc_episodes: int = 5000,
@@ -854,6 +866,9 @@ def main(
 
     # Re-run only causal tests without retraining (after changing n_aap_episodes)
     modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --n-aap-episodes 200
+
+    # Theme C — on-manifold check + extra-factor probes (no retraining)
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --extended-validation
     """
     if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect,
                 do_collect_optionc, do_remerge_optionc, do_audit, do_statistical_study]):
@@ -904,6 +919,7 @@ def main(
             no_wandb=no_wandb,
             mask_teleport=mask_causal_test,
             dataset_name=dataset_name,
+            extended_validation=extended_validation,
         )
         print(f"Results file on volume: {results_file}")
 

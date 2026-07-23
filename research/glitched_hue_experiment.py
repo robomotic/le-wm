@@ -81,6 +81,17 @@ def main():
         "--dataset-name", default=_DATASET_NAME,
         help="HDF5 dataset name in STABLEWM_HOME (default: glitched_hue_tworoom_half)",
     )
+    parser.add_argument(
+        "--extended-validation", action="store_true",
+        help=(
+            "Theme C: validate the hue intervention itself. Adds (A) an "
+            "on-manifold check — is z_cf a realistic encoder output vs a "
+            "random-direction negative control? — and (B) linear probes + "
+            "InvErr for extra decodable factors (teleported, step_idx, "
+            "distance_to_target) beyond position, to check for single-factor "
+            "leakage. No retraining; reuses the existing checkpoint/latents."
+        ),
+    )
     args = parser.parse_args()
 
     dataset_name = args.dataset_name
@@ -120,10 +131,15 @@ def main():
     # -------------------------------------------------------------------
     print(f"\n[2/5] Extracting latents ({args.n_probe_batches} batches) ...")
     loader = _make_loader(dataset_name=dataset_name)
-    z_all, hue_all, pos_all, max_deltas = _extract_probe_data(
+    probe_data = _extract_probe_data(
         jepa, loader, args.n_probe_batches,
         mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+        extra_factors=args.extended_validation,
     )
+    if args.extended_validation:
+        z_all, hue_all, pos_all, max_deltas, extra_factors = probe_data
+    else:
+        z_all, hue_all, pos_all, max_deltas = probe_data
     print(f"      {len(z_all)} samples, embed_dim={z_all.shape[1]}")
 
     print("      Training probes ...")
@@ -133,6 +149,13 @@ def main():
         hue_dir, delta_hue, pos_dirs,
     ) = _train_probes(z_all, hue_all, pos_all)
     print(f"      Position R² = {pos_r2:.4f}   Hue accuracy = {hue_acc:.4f}")
+
+    factor_probe_metrics, factor_inv = {}, {}
+    if args.extended_validation:
+        print("      Training extra factor probes (teleported/step_idx/distance_to_target) ...")
+        factor_probe_metrics, factor_dirs = _train_factor_probes(z_all, extra_factors)
+        for name, m in factor_probe_metrics.items():
+            print(f"        {name:<20s} {m['metric']} = {m['value']:.4f}")
 
     # -------------------------------------------------------------------
     # Stage 3 — AAP cycle
@@ -172,6 +195,15 @@ def main():
     )
     print(f"       Invariance error: {inv_error:.6f} ± {inv_error_std:.6f}")
 
+    if args.extended_validation and factor_dirs:
+        print("       Extra-factor invariance (Theme C item B) ...")
+        factor_inv = _multi_factor_invariance(
+            jepa, loader, delta_hue, factor_dirs,
+            mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+        )
+        for name, (mean, std) in factor_inv.items():
+            print(f"        {name:<20s} InvErr = {mean:.6f} ± {std:.6f}")
+
     # -------------------------------------------------------------------
     # Stage 4b — AAP consistency advantage
     # -------------------------------------------------------------------
@@ -204,6 +236,12 @@ def main():
         "per_episode_ratios":                 per_ep_ratios,
     }
 
+    if args.extended_validation:
+        metrics["factor_probes"] = factor_probe_metrics
+        metrics["factor_invariance"] = {
+            name: {"mean": mean, "std": std} for name, (mean, std) in factor_inv.items()
+        }
+
     _print_report(metrics)
 
     results_path = out_dir / f"causal_test{suffix}_results.json"
@@ -215,6 +253,23 @@ def main():
     _save_plots(aap_results, z_all, hue_all, max_deltas, delta_hue, out_dir, suffix)
     print(f"Plots    → {out_dir}/surprise_over_time{suffix}.pdf / .png")
     print(f"         → {out_dir}/latent_pca{suffix}.pdf / .png")
+
+    # -------------------------------------------------------------------
+    # Stage 6 — On-manifold check (Theme C item A)
+    # -------------------------------------------------------------------
+    if args.extended_validation:
+        print("\n[extended] On-manifold check ...")
+        on_manifold_metrics, on_manifold_points = _on_manifold_check(z_all, aap_results, delta_hue)
+        metrics["on_manifold"] = on_manifold_metrics
+        for space in ("mahalanobis", "knn_distance"):
+            f_, cf_, r_ = (on_manifold_metrics[space][g]["mean"] for g in ("z_fact", "z_cf", "z_rand"))
+            print(f"        {space:<14s} mean: z_fact={f_:.4f}  z_cf={cf_:.4f}  z_rand(neg ctrl)={r_:.4f}")
+
+        with open(results_path, "w") as f:
+            json.dump({"checkpoint": str(args.ckpt_path), "metrics": metrics}, f, indent=2)
+
+        _plot_on_manifold(on_manifold_points, out_dir, suffix)
+        print(f"Plot     → {out_dir}/on_manifold{suffix}.pdf / .png")
 
     if not args.no_wandb:
         _log_to_wandb(metrics, args.ckpt_path, out_dir, suffix)
@@ -258,6 +313,9 @@ def _mask_tp(pixels: torch.Tensor, tp_bbox: tuple) -> torch.Tensor:
 # Stage 2 — Data loading and probe training
 # ---------------------------------------------------------------------------
 
+_EXTRA_FACTOR_KEYS = ["teleported", "step_idx", "distance_to_target"]
+
+
 def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME):
     """Build a DataLoader over the given HDF5 dataset with the training pipeline."""
     import stable_worldmodel as swm
@@ -268,8 +326,8 @@ def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME):
         num_steps=_NUM_STEPS,
         frameskip=_FRAMESKIP,
         name=dataset_name,
-        keys_to_load=["pixels", "action", "proprio"],
-        keys_to_cache=["action", "proprio"],
+        keys_to_load=["pixels", "action", "proprio"] + _EXTRA_FACTOR_KEYS,
+        keys_to_cache=["action", "proprio"] + _EXTRA_FACTOR_KEYS,
         transform=None,
     )
     transforms = [get_img_preprocessor("pixels", "pixels", _IMG_SIZE)]
@@ -284,15 +342,19 @@ def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME):
 
 
 @torch.no_grad()
-def _extract_probe_data(jepa, loader, n_batches, mask_teleport=False, tp_bbox=None):
-    """Return (z, hue_scores, positions, max_deltas) arrays for probe training.
+def _extract_probe_data(jepa, loader, n_batches, mask_teleport=False, tp_bbox=None,
+                         extra_factors=False):
+    """Return (z, hue_scores, positions, max_deltas[, extras]) arrays for probe training.
 
     hue_scores: G_norm - B_norm per window (positive = green, negative = blue)
     positions:  first 2 dims of proprio at the first timestep
     max_deltas: maximum inter-frame positional delta within each window (proxy
                 for teleport events — large values indicate a teleport fired)
+    extras:     dict of {factor_name: (N,) array}, first-timestep value of each
+                key in _EXTRA_FACTOR_KEYS — only collected when extra_factors=True
     """
     zs, hues, poss, deltas = [], [], [], []
+    extras = {k: [] for k in _EXTRA_FACTOR_KEYS} if extra_factors else None
 
     for i, batch in enumerate(loader):
         if i >= n_batches:
@@ -318,12 +380,19 @@ def _extract_probe_data(jepa, loader, n_batches, mask_teleport=False, tp_bbox=No
         ).norm(dim=-1)  # (B, T-1)
         deltas.append(delta.max(dim=-1).values.float().numpy())
 
-    return (
+        if extra_factors:
+            for k in _EXTRA_FACTOR_KEYS:
+                extras[k].append(batch[k][:, 0].float().numpy())
+
+    result = (
         np.concatenate(zs),
         np.concatenate(hues),
         np.concatenate(poss),
         np.concatenate(deltas),
     )
+    if extra_factors:
+        result = result + ({k: np.concatenate(v) for k, v in extras.items()},)
+    return result
 
 
 def _train_probes(z, hue_scores, pos):
@@ -373,6 +442,54 @@ def _train_probes(z, hue_scores, pos):
     pos_dirs = torch.tensor(pos_coef_orig, dtype=torch.float32, device=_DEVICE)
 
     return probe_pos, probe_hue, scaler, pos_r2, hue_acc, hue_dir, delta_hue, pos_dirs
+
+
+def _train_factor_probes(z, extras):
+    """Train one linear probe per extra decodable factor (Theme C, item B).
+
+    `extras` is the {factor_name: (N,) array} dict returned by
+    `_extract_probe_data(..., extra_factors=True)`. `teleported` is binary
+    (LogisticRegression); `step_idx` and `distance_to_target` are continuous
+    (Ridge). Mirrors `_train_probes`' scaling/split/coef-conversion approach.
+
+    Returns (factor_metrics, factor_dirs):
+      factor_metrics — {name: {"metric": "accuracy"|"r2", "value": float}}
+      factor_dirs    — {name: (1, D) unscaled weight-direction tensor}
+    """
+    rng = np.random.default_rng(42)
+    scaler = StandardScaler()
+    z_s = scaler.fit_transform(z)
+    inv_scale = 1.0 / (scaler.scale_ + 1e-8)
+
+    idx  = rng.permutation(len(z))
+    n_tr = int(0.8 * len(z))
+    tr, te = idx[:n_tr], idx[n_tr:]
+
+    factor_metrics, factor_dirs = {}, {}
+    for name, target in extras.items():
+        if name == "teleported":
+            labels = (target > 0.5).astype(int)
+            if len(np.unique(labels[tr])) < 2:
+                continue  # degenerate split — skip rather than fit a useless probe
+            probe = LogisticRegression(max_iter=1000, C=1.0)
+            probe.fit(z_s[tr], labels[tr])
+            value = float(accuracy_score(labels[te], probe.predict(z_s[te])))
+            metric_name = "accuracy"
+            coef = probe.coef_[0]
+        else:
+            probe = Ridge(alpha=1.0)
+            probe.fit(z_s[tr], target[tr])
+            value = float(r2_score(target[te], probe.predict(z_s[te])))
+            metric_name = "r2"
+            coef = probe.coef_
+
+        coef_orig = coef * inv_scale  # (D,)
+        factor_metrics[name] = {"metric": metric_name, "value": value}
+        factor_dirs[name] = torch.tensor(
+            coef_orig[None], dtype=torch.float32, device=_DEVICE
+        )  # (1, D)
+
+    return factor_metrics, factor_dirs
 
 
 # ---------------------------------------------------------------------------
@@ -467,16 +584,18 @@ def _run_aap_cycle(jepa, loader, hue_dir, delta_hue, n_episodes,
 # ---------------------------------------------------------------------------
 
 @torch.no_grad()
-def _structural_invariance(jepa, loader, delta_hue, pos_dirs, n_batches=30,
-                            mask_teleport=False, tp_bbox=None):
-    """Mean absolute change in the position subspace after the hue intervention.
+def _multi_factor_invariance(jepa, loader, delta_hue, factor_dirs, n_batches=30,
+                              mask_teleport=False, tp_bbox=None):
+    """Mean absolute change in each factor's probe subspace after the hue intervention.
 
-    Invariance Error = mean |z @ pos_dirs.T - z_cf @ pos_dirs.T|
+    Invariance Error (per factor) = mean |z @ w.T - z_cf @ w.T|
 
-    Near zero means the position dimensions are orthogonal to the hue
-    intervention vector (Independent Causal Mechanisms).
+    Near zero means that factor's probe direction is orthogonal to the hue
+    intervention vector (Independent Causal Mechanisms). `factor_dirs` maps
+    factor name -> (K, D) weight-direction tensor (K=2 for position, K=1 for
+    scalar factors like teleported/step_idx/distance_to_target).
     """
-    errors = []
+    errors = {name: [] for name in factor_dirs}
     for i, batch in enumerate(loader):
         if i >= n_batches:
             break
@@ -489,12 +608,25 @@ def _structural_invariance(jepa, loader, delta_hue, pos_dirs, n_batches=30,
         z    = out["emb"].reshape(B * T, D)   # (BT, D)
         z_cf = z + delta_hue                   # (BT, D)
 
-        # Project both onto position directions and measure drift
-        pos_fact = z    @ pos_dirs.T           # (BT, 2)
-        pos_cf   = z_cf @ pos_dirs.T
-        errors.append((pos_fact - pos_cf).abs().mean().item())
+        for name, w in factor_dirs.items():
+            fact_proj = z    @ w.T             # (BT, K)
+            cf_proj   = z_cf @ w.T
+            errors[name].append((fact_proj - cf_proj).abs().mean().item())
 
-    return float(np.mean(errors)), float(np.std(errors))
+    return {
+        name: (float(np.mean(vals)), float(np.std(vals)))
+        for name, vals in errors.items()
+    }
+
+
+def _structural_invariance(jepa, loader, delta_hue, pos_dirs, n_batches=30,
+                            mask_teleport=False, tp_bbox=None):
+    """Position-only structural invariance (thin wrapper over _multi_factor_invariance)."""
+    result = _multi_factor_invariance(
+        jepa, loader, delta_hue, {"position": pos_dirs}, n_batches=n_batches,
+        mask_teleport=mask_teleport, tp_bbox=tp_bbox,
+    )
+    return result["position"]
 
 
 # ---------------------------------------------------------------------------
@@ -558,6 +690,99 @@ def _aap_consistency_advantage(jepa, loader, n_warmup=20, n_eval=50,
     mean_with    = float(torch.cat(s_with).mean())
     mean_without = float(torch.cat(s_without).mean())
     return mean_without - mean_with, mean_with, mean_without
+
+
+# ---------------------------------------------------------------------------
+# Stage 6 — On-manifold check (Theme C, item A)
+# ---------------------------------------------------------------------------
+
+def _on_manifold_check(z_all, aap_results, delta_hue, seed=42):
+    """Is z_cf = z_fact + delta_hue a realistic encoder output, or off-manifold?
+
+    Fits a reference manifold (Mahalanobis via shrinkage covariance, plus a
+    kNN-distance fallback) on the same held-out 20% split `_train_probes`
+    carves out of z_all (same seed, so this is the probes' true held-out set —
+    no new data loading). Scores z_fact, z_cf, and a random-direction negative
+    control (same magnitude as delta_hue, random unit direction) against that
+    reference set.
+
+    Returns (metrics, per_point) where per_point holds raw per-episode arrays
+    for plotting.
+    """
+    from sklearn.covariance import LedoitWolf
+    from sklearn.neighbors import NearestNeighbors
+
+    rng_np = np.random.default_rng(seed)
+    idx    = rng_np.permutation(len(z_all))
+    n_tr   = int(0.8 * len(z_all))
+    z_ref  = z_all[idx[n_tr:]]  # held-out 20%, same split as _train_probes
+
+    cov  = LedoitWolf().fit(z_ref)
+    nn   = NearestNeighbors(n_neighbors=min(10, len(z_ref))).fit(z_ref)
+
+    delta_np   = delta_hue.detach().cpu().numpy()
+    delta_norm = float(np.linalg.norm(delta_np))
+
+    z_fact = np.stack([r["z_fact"] for r in aap_results])   # (N, D)
+    z_cf   = np.stack([r["z_cf"]   for r in aap_results])   # (N, D)
+
+    rand_dirs = rng_np.normal(size=z_fact.shape)
+    rand_dirs /= np.linalg.norm(rand_dirs, axis=1, keepdims=True) + 1e-8
+    z_rand = z_fact + delta_norm * rand_dirs                # negative control
+
+    def _score(points):
+        maha = cov.mahalanobis(points)
+        knn_dist, _ = nn.kneighbors(points)
+        return maha, knn_dist.mean(axis=1)
+
+    maha_fact, knn_fact = _score(z_fact)
+    maha_cf,   knn_cf   = _score(z_cf)
+    maha_rand, knn_rand = _score(z_rand)
+
+    def _summ(arr):
+        return {
+            "mean":   float(np.mean(arr)),
+            "median": float(np.median(arr)),
+            "p90":    float(np.percentile(arr, 90)),
+        }
+
+    metrics = {
+        "mahalanobis": {"z_fact": _summ(maha_fact), "z_cf": _summ(maha_cf), "z_rand": _summ(maha_rand)},
+        "knn_distance": {"z_fact": _summ(knn_fact), "z_cf": _summ(knn_cf), "z_rand": _summ(knn_rand)},
+        "n_reference": len(z_ref),
+        "n_episodes": len(z_fact),
+    }
+    per_point = {
+        "maha_fact": maha_fact, "maha_cf": maha_cf, "maha_rand": maha_rand,
+        "knn_fact": knn_fact, "knn_cf": knn_cf, "knn_rand": knn_rand,
+    }
+    return metrics, per_point
+
+
+def _plot_on_manifold(per_point, out_dir, suffix=""):
+    """Box plots comparing Mahalanobis / kNN distance-to-manifold across
+    z_fact (real), z_cf (hue intervention), z_rand (negative control)."""
+    _setup_pub_style()
+    fig, axes = plt.subplots(1, 2, figsize=(6.0, 2.7))
+
+    groups  = ["fact", "cf", "rand"]
+    labels  = [r"$z_\mathrm{fact}$", r"$z_\mathrm{cf}$", r"$z_\mathrm{rand}$"]
+    colours = [_C["blue"], _C["orange"], _C["red"]]
+
+    for ax, key, title in [
+        (axes[0], "maha", "Mahalanobis distance"),
+        (axes[1], "knn",  "kNN distance ($k$=10)"),
+    ]:
+        data = [per_point[f"{key}_{g}"] for g in groups]
+        bp = ax.boxplot(data, tick_labels=labels, showfliers=False, patch_artist=True)
+        for patch, colour in zip(bp["boxes"], colours):
+            patch.set_facecolor(colour)
+            patch.set_alpha(0.35)
+        ax.set_title(title)
+        _despine(ax)
+
+    fig.tight_layout()
+    _save_fig(fig, out_dir, f"on_manifold{suffix}")
 
 
 # ---------------------------------------------------------------------------
@@ -787,7 +1012,7 @@ def _log_to_wandb(metrics, ckpt_path, out_dir, suffix=""):
         config={"checkpoint": str(ckpt_path), "mask_teleport": bool(suffix)},
     )
     payload = {f"causal/{k}": v for k, v in metrics.items()}
-    for stem in ("surprise_over_time", "latent_pca"):
+    for stem in ("surprise_over_time", "latent_pca", "on_manifold"):
         p = out_dir / f"{stem}{suffix}.png"
         if p.exists():
             payload[f"causal/{stem}"] = wandb.Image(str(p))

@@ -243,7 +243,7 @@ is available.
 
 ---
 
-## Summary of all runs (2026-04-22 / 24)
+## Summary of all runs (2026-04-22 / 24) — single-seed, ratio-of-means metric
 
 | Experiment | SIGReg λ | Pixel masked | Hue confound | Pos R² | Surprise ratio | Struct. inv. error | Verdict |
 |-----------|---------|-------------|-------------|--------|---------------|-------------------|---------|
@@ -253,6 +253,8 @@ is available.
 | Option C | 0.09 | No | Reversed | 0.987 | 0.800 | 0.777 | Pixel available; hue anti-correlated |
 | Option C+A | 0.09 | Yes | Reversed | 0.987 | 1.240 | 1.032 | Both removed → model fails |
 | **SIGReg ablation** | **0** | **Yes (train+test)** | **Normal** | **0.064** | **2.196** | **1439.5** | **SIGReg removed → latent space collapses** |
+
+*Surprise ratio here is ratio-of-means: `mean(surp_cf) / mean(surp_fact)`. See multi-seed study below for the statistically correct per-episode mean.*
 
 **What the ladder of experiments shows:**
 
@@ -276,9 +278,163 @@ is available.
 - **SIGReg is responsible for ICM (ablation):** training with λ=0 and the same pixel
   masking as Option B collapses structural invariance error by ~7000× (0.204 → 1440) and
   destroys position linearity (R² 0.993 → 0.064). The model still achieves low pred_loss
-  (~8e-9) but builds a completely entangled non-linear latent space where the hue direction
-  bleeds massively into the position subspace. This confirms that SIGReg is the mechanism
-  behind Option B's clean hue/position disentanglement — not the pixel masking alone.
+  but builds a completely entangled non-linear latent space where the hue direction bleeds
+  massively into the position subspace. This confirms that SIGReg is the mechanism behind
+  Option B's clean hue/position disentanglement — not the pixel masking alone.
 
-  *Note: ablation result is at epoch 27 (checkpoint committed before training completed);
-  the signal is already decisive at this early checkpoint.*
+---
+
+## Multi-seed Statistical Study (2026-05-12)
+
+Full methodology documented in `reports/statistical_study.md`.
+
+### Metric change: per-episode ratio
+
+The publication-ready metric is **mean of per-episode ratios** (mean ± std over N=200 episodes):
+
+```
+r_i = surp_cf_i / (surp_fact_i + ε)    for each episode i
+report:  mean(r_i) ± std(r_i)
+```
+
+This is not directly comparable to the single-seed ratio-of-means above. Per-episode ratios
+have higher magnitude when many episodes have near-zero factual surprise (which inflates
+individual r_i). The per-episode formulation is statistically correct for publication.
+
+### Setup
+
+| Condition | Seeds | Epochs | Checkpoints used |
+|-----------|-------|--------|-----------------|
+| Baseline | 3072, 1234, 5678 | 50 | `lewm_epoch_50`, `ts_1777994910/lewm_epoch_50`, `ts_1777991006/lewm_epoch_50` |
+| Option B | 3072, 1234, 5678 | 90–100 | `ts_1776884938/lewm_epoch_50`, `ts_1778145022_93c1c4/lewm_epoch_91`, `ts_1778145025_368123/lewm_epoch_90` |
+| SIGReg ablation (λ=0) | 3072, 1234, 5678 | 50 | `ts_1777735299/lewm_epoch_50`, `ts_1778145024_04e194/lewm_epoch_50`, `ts_1777735306/lewm_epoch_50` |
+| Option C | 3072 | — (no training) | `lewm_epoch_50` on reversed dataset |
+| Option C+A | 3072 | — (no training) | `lewm_epoch_50` on reversed dataset, pixel masked |
+
+Option B required 90–100 epochs to converge (50-epoch checkpoints showed SIE ≈ 289,
+under-converged). Epoch-91 and epoch-90 checkpoints were used for seeds 1234 and 5678.
+
+### Results (N=200 AAP episodes, N=30 invariance batches)
+
+| Condition | n seeds | Pos R² | Surprise ratio (mean ± std) | Struct. inv. error (mean ± std) |
+|-----------|---------|--------|----------------------------|--------------------------------|
+| Baseline | 3 | 0.961 | **10.18 ± 4.61** | 0.632 ± 0.335 |
+| Option B (mask p=0.5, 90-100 ep) | 3 | 0.995 | **15.17 ± 7.49** | **0.188 ± 0.071** |
+| Option C (reversed dataset) | 1 | 0.986 | **1.44** | 0.900 |
+| Option C+A (reversed + masked) | 1 | 0.989 | **1.31** | 1.333 |
+| SIGReg ablation (λ=0) | 3 | 0.151 | **2.76 ± 2.09** | **353.4 ± 255.3** |
+
+### Interpretation (updated)
+
+Qualitative conclusions from the single-seed study hold and are strengthened:
+
+- **Option B increases surprise ratio vs Baseline** (15.17 vs 10.18), consistent across
+  all 3 seeds. Masking the pixel at train time causes the model to rely more heavily on hue.
+  The low SIE (0.188 ± 0.071) is the most reproducible result: SIGReg-driven hue/position
+  disentanglement is stable across seeds.
+
+- **Option C and C+A now both exceed ratio = 1.0** (1.44 and 1.31) under the per-episode
+  metric. The single-seed ratio-of-means for Option C was 0.800, but episode-level variance
+  reveals the model has no reliable latent causal signal when the hue confound is reversed.
+  This strengthens the conclusion: `lewm_epoch_50` is a Ladder 1/2 model.
+
+- **SIGReg ablation:** lowest mean ratio (2.76), but this reflects prediction collapse, not
+  causal reasoning. SIE ≈ 353 (vs 0.188 for Option B) and Pos R² ≈ 0.15 confirm the latent
+  space is unstructured. High std (±255.3 for SIE, ±2.09 for ratio) is expected across seeds
+  when the regularizer is removed — the latent space settles in a different degenerate
+  configuration for each seed.
+
+- **SIGReg ablation epoch note:** all three ablation seeds ran to epoch 50 (previously
+  only an epoch-27 crash checkpoint existed). The signal is decisive: epoch-50 results
+  (SIE ≈ 353) confirm the epoch-27 estimate (SIE ≈ 1440) was not a transient — the latent
+  space remains fully entangled throughout training without SIGReg.
+
+### LaTeX table (NeurIPS/ICLR format)
+
+```latex
+\begin{table}[h]
+\centering
+\begin{tabular}{lccc}
+\toprule
+Condition & Surprise ratio & Struct.\ inv.\ error & Pos $R^2$ \\
+          & (mean\,$\pm$\,std, $N=200$) & (mean\,$\pm$\,std, $N=30$) & \\
+\midrule
+Baseline               & $10.18 \pm 4.61$ & $0.632 \pm 0.335$ & $0.961$ \\
+Option A               & $—$              & $—$               & $—$     \\
+Option B               & $15.17 \pm 7.49$ & $0.188 \pm 0.071$ & $0.995$ \\
+Option C               & $1.44$           & $0.900$           & $0.986$ \\
+Option C+A             & $1.31$           & $1.333$           & $0.989$ \\
+Ablation ($\lambda=0$) & $2.76 \pm 2.09$  & $353.4 \pm 255.3$ & $0.151$ \\
+\bottomrule
+\end{tabular}
+\caption{LeWM causal ladder results (mean\,$\pm$\,std over 3 seeds where available,
+200 AAP episodes per run). Surprise ratio is the per-episode mean of
+$r_i = \text{surp\_cf}_i / (\text{surp\_fact}_i + \varepsilon)$.}
+\end{table}
+```
+
+---
+
+## Theme C — On-manifold + single-factor validation of the hue intervention (2026-07-23)
+
+Two reviewers independently raised the same concern: is $z_\mathrm{cf} = z_\mathrm{fact} + \Delta_\mathrm{hue}$
+(the counterfactual latent used throughout the AAP cycle above) a valid single-factor
+intervention, or does it push the latent off the data manifold / leak into factors other than
+position? `research/glitched_hue_experiment.py --extended-validation` adds two checks to answer
+this, run on `lewm_epoch_50` (baseline, unmasked, $N=200$ AAP episodes, $N=2560$ held-out
+reference points).
+
+**Correction:** $\Delta_\mathrm{hue}$ is a *translation* (mean blue→green shift from the hue
+probe), not a Householder reflection — there is no reflection code in this script. The checks
+below validate the translation intervention that actually exists.
+
+### A. On-manifold check
+
+Score $z_\mathrm{fact}$, $z_\mathrm{cf}$, and $z_\mathrm{rand}$ (negative control: same magnitude
+as $\Delta_\mathrm{hue}$, random direction) against a shrinkage-regularised (LedoitWolf)
+Mahalanobis distance and a $k$NN distance ($k$=10), both fit on the probes' held-out 20% split.
+
+| Metric | $z_\mathrm{fact}$ (mean) | $z_\mathrm{cf}$ (mean) | $z_\mathrm{rand}$ (mean) |
+|---|---:|---:|---:|
+| Mahalanobis distance | 153.5 | 169.3 | 399.6 |
+| $k$NN distance | 6.53 | 7.64 | 7.65 |
+
+**Verdict — mixed.** Under Mahalanobis distance, $z_\mathrm{cf}$ sits close to $z_\mathrm{fact}$
+(+10%) and far below the random-direction control (399.6, +160%): the hue translation stays
+close to the SIGReg-shaped manifold, unlike an arbitrary direction. Under $k$NN distance,
+however, $z_\mathrm{cf}$ and $z_\mathrm{rand}$ are statistically indistinguishable (7.64 vs 7.65)
+— raw nearest-neighbour distance in a 192-d space doesn't discriminate a structured hue shift
+from a random one; only the covariance-aware Mahalanobis metric does. Report both: the
+on-manifold claim holds for the metric that accounts for SIGReg's isotropic-Gaussian shaping,
+not for the naive one.
+
+### B. Single-factor preservation beyond position
+
+Extra decodable factors from the HDF5 schema (`teleported`, `step_idx`, `distance_to_target`),
+each with its own linear probe and InvErr $= \lVert W_f(z_\mathrm{fact}) - W_f(z_\mathrm{cf})\rVert$
+(same formula as the existing position/hue structural invariance check, which gives
+InvErr $=0.336$ for position on this checkpoint):
+
+| Factor | Probe metric | Probe value | Target std (dataset) | InvErr | InvErr / std |
+|---|---|---:|---:|---:|---:|
+| teleported | accuracy | 0.998 | — (binary) | 0.164 | — |
+| step_idx | $R^2$ | 0.678 | 22.81 | 26.88 | 1.18 |
+| distance_to_target | $R^2$ | 0.467 | 42.31 | 37.96 | 0.90 |
+
+**Verdict — leakage confirmed, not near-zero.** `teleported` leaks the least (InvErr 0.164,
+smaller than position's 0.336) — consistent with it being what the hue intervention is trying to
+stand in for. But `step_idx` and `distance_to_target` are each well-decodable ($R^2$ 0.68 and
+0.47) *and* shift by more than 0.9–1.2 standard deviations of their own scale under the hue
+translation. This is exactly the single-factor leakage 2ziA/CMTV suspected: the hue intervention
+is not confined to the hue↔teleport subspace — it measurably perturbs the model's implicit
+estimate of how far into the episode the agent is and how close it is to the goal. This caveat
+should be reported alongside the surprise-ratio results above, not treated as a clean pass.
+
+### Reproduce
+
+```
+modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --extended-validation
+```
+
+Results: `causal_test_results.json` (`on_manifold`, `factor_probes`, `factor_invariance` keys)
+and `on_manifold.pdf` / `.png` on the `swm-cache` volume alongside the checkpoint.
