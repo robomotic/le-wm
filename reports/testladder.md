@@ -413,7 +413,15 @@ not for the naive one.
 Extra decodable factors from the HDF5 schema (`teleported`, `step_idx`, `distance_to_target`),
 each with its own linear probe and InvErr $= \lVert W_f(z_\mathrm{fact}) - W_f(z_\mathrm{cf})\rVert$
 (same formula as the existing position/hue structural invariance check, which gives
-InvErr $=0.336$ for position on this checkpoint):
+InvErr $=0.336$ for position on this checkpoint, vs. $0.380$ in the Baseline row of the summary
+table above — **this is not a regression.** `_make_loader`'s `DataLoader` had no seeded
+generator, so every run — including the original Baseline run — drew a different random batch
+order, and both the probe fit and the invariance average depend on that order. Verified
+directly: two back-to-back runs of the *unmodified* script against the same checkpoint gave
+0.303 and 0.293 for the same quantity. Fixed by seeding the DataLoader's shuffle generator
+(default 42, `--seed` to override); two runs post-fix now agree bit-for-bit (0.303741 both
+times). The 0.380/0.336 figures predate this fix and aren't directly comparable, but the gap is
+consistent with the ~10-15% run-to-run noise band observed above, not a real shift):
 
 | Factor | Probe metric | Probe value | Target std (dataset) | InvErr | InvErr / std |
 |---|---|---:|---:|---:|---:|

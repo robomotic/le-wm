@@ -82,6 +82,14 @@ def main():
         help="HDF5 dataset name in STABLEWM_HOME (default: glitched_hue_tworoom_half)",
     )
     parser.add_argument(
+        "--seed", type=int, default=42,
+        help=(
+            "Seed for the DataLoader's shuffle generator. Fixes the sequence of "
+            "batches used for probe training and invariance checks so results "
+            "are reproducible run-to-run on the same checkpoint (default: 42)."
+        ),
+    )
+    parser.add_argument(
         "--extended-validation", action="store_true",
         help=(
             "Theme C: validate the hue intervention itself. Adds (A) an "
@@ -130,7 +138,7 @@ def main():
     # Stage 2 — Extract latents; train linear probes
     # -------------------------------------------------------------------
     print(f"\n[2/5] Extracting latents ({args.n_probe_batches} batches) ...")
-    loader = _make_loader(dataset_name=dataset_name)
+    loader = _make_loader(dataset_name=dataset_name, seed=args.seed)
     probe_data = _extract_probe_data(
         jepa, loader, args.n_probe_batches,
         mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
@@ -316,8 +324,16 @@ def _mask_tp(pixels: torch.Tensor, tp_bbox: tuple) -> torch.Tensor:
 _EXTRA_FACTOR_KEYS = ["teleported", "step_idx", "distance_to_target"]
 
 
-def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME):
-    """Build a DataLoader over the given HDF5 dataset with the training pipeline."""
+def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME, seed=42):
+    """Build a DataLoader over the given HDF5 dataset with the training pipeline.
+
+    `seed` fixes the DataLoader's shuffle generator so that the *sequence* of
+    batch orderings is reproducible run-to-run (previously unseeded, so e.g.
+    structural_invariance_error varied by ~10-15% between identical runs on
+    the same checkpoint). Stages still see different subsamples of the data
+    from each other within one run, since the generator's state advances with
+    every `for batch in loader` — only cross-run determinism is new.
+    """
     import stable_worldmodel as swm
     import stable_pretraining as spt
     from utils import get_img_preprocessor, get_column_normalizer
@@ -335,9 +351,10 @@ def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME):
         transforms.append(get_column_normalizer(dataset, col, col))
     dataset.transform = spt.data.transforms.Compose(*transforms)
 
+    generator = torch.Generator().manual_seed(seed) if shuffle else None
     return torch.utils.data.DataLoader(
         dataset, batch_size=batch_size, shuffle=shuffle,
-        num_workers=4, drop_last=True,
+        num_workers=4, drop_last=True, generator=generator,
     )
 
 
