@@ -308,8 +308,8 @@ individual r_i). The per-episode formulation is statistically correct for public
 | Baseline | 3072, 1234, 5678 | 50 | `lewm_epoch_50`, `ts_1777994910/lewm_epoch_50`, `ts_1777991006/lewm_epoch_50` |
 | Option B | 3072, 1234, 5678 | 90–100 | `ts_1776884938/lewm_epoch_50`, `ts_1778145022_93c1c4/lewm_epoch_91`, `ts_1778145025_368123/lewm_epoch_90` |
 | SIGReg ablation (λ=0) | 3072, 1234, 5678 | 50 | `ts_1777735299/lewm_epoch_50`, `ts_1778145024_04e194/lewm_epoch_50`, `ts_1777735306/lewm_epoch_50` |
-| Option C | 3072 | — (no training) | `lewm_epoch_50` on reversed dataset |
-| Option C+A | 3072 | — (no training) | `lewm_epoch_50` on reversed dataset, pixel masked |
+| Option C | 3072, 1234, 5678 | — (no training) | `lewm_epoch_50`, `ts_1777994910/lewm_epoch_50`, `ts_1777991006/lewm_epoch_50` on reversed dataset |
+| Option C+A | 3072, 1234, 5678 | — (no training) | same three checkpoints on reversed dataset, pixel masked |
 
 Option B required 90–100 epochs to converge (50-epoch checkpoints showed SIE ≈ 289,
 under-converged). Epoch-91 and epoch-90 checkpoints were used for seeds 1234 and 5678.
@@ -320,8 +320,8 @@ under-converged). Epoch-91 and epoch-90 checkpoints were used for seeds 1234 and
 |-----------|---------|--------|----------------------------|--------------------------------|
 | Baseline | 3 | 0.961 | **10.18 ± 4.61** | 0.632 ± 0.335 |
 | Option B (mask p=0.5, 90-100 ep) | 3 | 0.995 | **15.17 ± 7.49** | **0.188 ± 0.071** |
-| Option C (reversed dataset) | 1 | 0.986 | **1.44** | 0.900 |
-| Option C+A (reversed + masked) | 1 | 0.989 | **1.31** | 1.333 |
+| Option C (reversed dataset) | 3 | 0.988 | **2.02 ± 0.41** | 1.00 ± 0.11 |
+| Option C+A (reversed + masked) | 3 | 0.986 | **1.23 ± 0.07** | 0.95 ± 0.28 |
 | SIGReg ablation (λ=0) | 3 | 0.151 | **2.76 ± 2.09** | **353.4 ± 255.3** |
 
 ### Interpretation (updated)
@@ -333,10 +333,16 @@ Qualitative conclusions from the single-seed study hold and are strengthened:
   The low SIE (0.188 ± 0.071) is the most reproducible result: SIGReg-driven hue/position
   disentanglement is stable across seeds.
 
-- **Option C and C+A now both exceed ratio = 1.0** (1.44 and 1.31) under the per-episode
-  metric. The single-seed ratio-of-means for Option C was 0.800, but episode-level variance
-  reveals the model has no reliable latent causal signal when the hue confound is reversed.
-  This strengthens the conclusion: `lewm_epoch_50` is a Ladder 1/2 model.
+- **Option C and C+A now have real 3-seed statistics (added 2026-07-24; seeds 1234/5678
+  reused already-trained baseline checkpoints and the already-collected reversed dataset — no
+  retraining, no new data collection).** Both conditions exceed ratio = 1.0 **on every individual
+  seed**: Option C ratios are 1.44 / 2.32 / 2.31 (mean 2.02 ± 0.41); Option C+A ratios are
+  1.31 / 1.14 / 1.24 (mean 1.23 ± 0.07, the tightest spread of any condition in this table). The
+  single-seed ratio-of-means for Option C was 0.800 (superseded — see the per-episode caveat
+  above); with 3 seeds of the statistically-correct per-episode metric, the model has no reliable
+  latent causal signal when the hue confound is reversed, with or without the pixel masked. This
+  strengthens the conclusion: `lewm_epoch_50` is a Ladder 1/2 model, and it now rests on the same
+  multi-seed footing as Baseline/Option B/ablation rather than a single point estimate.
 
 - **SIGReg ablation:** lowest mean ratio (2.76), but this reflects prediction collapse, not
   causal reasoning. SIE ≈ 353 (vs 0.188 for Option B) and Pos R² ≈ 0.15 confirm the latent
@@ -362,14 +368,15 @@ Condition & Surprise ratio & Struct.\ inv.\ error & Pos $R^2$ \\
 Baseline               & $10.18 \pm 4.61$ & $0.632 \pm 0.335$ & $0.961$ \\
 Option A               & $—$              & $—$               & $—$     \\
 Option B               & $15.17 \pm 7.49$ & $0.188 \pm 0.071$ & $0.995$ \\
-Option C               & $1.44$           & $0.900$           & $0.986$ \\
-Option C+A             & $1.31$           & $1.333$           & $0.989$ \\
+Option C               & $2.02 \pm 0.41$  & $1.00 \pm 0.11$   & $0.988$ \\
+Option C+A             & $1.23 \pm 0.07$  & $0.95 \pm 0.28$   & $0.986$ \\
 Ablation ($\lambda=0$) & $2.76 \pm 2.09$  & $353.4 \pm 255.3$ & $0.151$ \\
 \bottomrule
 \end{tabular}
-\caption{LeWM causal ladder results (mean\,$\pm$\,std over 3 seeds where available,
-200 AAP episodes per run). Surprise ratio is the per-episode mean of
-$r_i = \text{surp\_cf}_i / (\text{surp\_fact}_i + \varepsilon)$.}
+\caption{LeWM causal ladder results (mean\,$\pm$\,std over 3 seeds, 200 AAP episodes per run;
+Option C/C+A added 2026-07-24, reusing the already-trained seed-1234/5678 checkpoints and the
+already-collected reversed dataset — no retraining or new data collection). Surprise ratio is the
+per-episode mean of $r_i = \text{surp\_cf}_i / (\text{surp\_fact}_i + \varepsilon)$.}
 \end{table}
 ```
 
