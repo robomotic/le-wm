@@ -59,9 +59,12 @@ Theme D — paired factual/counterfactual ground-truth trajectories (CMTV Critic
     hue + teleport-gating flipped per the training confound) directly from
     GlitchedHueTwoRoom-v1, then compares the model's prediction against a
     REAL encoded counterfactual frame instead of the translation-based
-    z_cf = z_fact + delta_hue used everywhere else.
+    z_cf = z_fact + delta_hue used everywhere else. Run BOTH validate calls:
+    --mask-theme-d is the paper's primary Ladder 3 test (Option A protocol);
+    the unmasked run is only a sanity-check baseline.
 
     modal run modaldotcom/app.py --do-collect-theme-d
+    modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50 --mask-theme-d
     modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
 
 Other commands
@@ -496,6 +499,7 @@ def theme_d_validate(
     policy: str,
     paired_dataset_name: str = "glitched_hue_theme_d",
     n_probe_batches: int = 200,
+    mask_teleport: bool = False,
     no_wandb: bool = False,
 ) -> str:
     """Run research/theme_d_paired_validation.py on a cloud A10G.
@@ -511,6 +515,11 @@ def theme_d_validate(
                                without the '_object.ckpt' suffix.
         paired_dataset_name:  Prefix used by collect_theme_d (default:
                                glitched_hue_theme_d).
+        mask_teleport:        Option A protocol -- zero out the teleport-pixel
+                               patch before every encode() call. This is the
+                               paper's primary Ladder 3 test (Option A/B/C+A);
+                               the unmasked run is only a sanity-check
+                               baseline. Run both.
         no_wandb:              If True, skip W&B logging (dry run).
 
     Returns:
@@ -530,6 +539,8 @@ def theme_d_validate(
         "--paired-dataset-name", paired_dataset_name,
         "--n-probe-batches", str(n_probe_batches),
     ]
+    if mask_teleport:
+        cmd.append("--mask-teleport")
     if no_wandb:
         cmd.append("--no-wandb")
 
@@ -538,7 +549,8 @@ def theme_d_validate(
 
     volume.commit()
 
-    results_file = f"{CACHE_DIR}/{os.path.dirname(policy)}/theme_d_paired_results.json"
+    suffix = "_masked" if mask_teleport else ""
+    results_file = f"{CACHE_DIR}/{os.path.dirname(policy)}/theme_d_paired_results{suffix}.json"
     print(f"\n✅ Theme D validation complete. Results: {results_file}")
     return results_file
 
@@ -915,6 +927,7 @@ def main(
     do_statistical_study: bool = False,
     do_collect_theme_d: bool = False,
     do_theme_d_validate: bool = False,
+    mask_theme_d: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
@@ -989,6 +1002,7 @@ def main(
 
     # Theme D — paired factual/counterfactual ground-truth trajectories (no retraining)
     modal run modaldotcom/app.py --do-collect-theme-d
+    modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50 --mask-theme-d
     modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
     """
     if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect,
@@ -1047,6 +1061,7 @@ def main(
         results_file = theme_d_validate.remote(
             policy=policy,
             paired_dataset_name=theme_d_dataset_name,
+            mask_teleport=mask_theme_d,
             no_wandb=no_wandb,
         )
         print(f"Theme D results file on volume: {results_file}")

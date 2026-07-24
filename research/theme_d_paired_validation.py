@@ -21,9 +21,19 @@ No retraining: reuses the existing lewm_epoch_50 checkpoint, and reuses
 _load_model/_make_loader/_train_probes from glitched_hue_experiment.py so the
 delta_hue translation baseline is identical to what's already reported.
 
+--mask-teleport applies the SAME Option A protocol used throughout
+research/glitched_hue_experiment.py: zero out the teleport-pixel patch before
+every encode() call (both baseline-probe training and fact/cf window
+encoding), forcing the model to rely on latent inference rather than the
+direct pixel cue. This is the paper's actual Ladder 3 test / primary claim
+(Option A/B/C+A) -- the unmasked run is only a sanity-check baseline. Run
+BOTH: the masked comparison is the one that stress-tests what CMTV is
+skeptical of.
+
 Usage:
     python research/theme_d_paired_validation.py <ckpt_path>
     python research/theme_d_paired_validation.py <ckpt_path> --paired-dataset-name glitched_hue_theme_d
+    python research/theme_d_paired_validation.py <ckpt_path> --mask-teleport   # primary Ladder 3 test
 """
 
 import argparse
@@ -42,7 +52,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from research.glitched_hue_experiment import (  # noqa: E402
     _load_model, _make_loader, _extract_probe_data, _train_probes,
-    _setup_pub_style, _despine, _save_fig, _C,
+    _setup_pub_style, _despine, _save_fig, _C, _mask_tp, _detect_teleport_bbox,
     _DEVICE, _HISTORY_SIZE, _FRAMESKIP, _NUM_STEPS, _DATASET_NAME,
 )
 
@@ -67,10 +77,12 @@ def _find_window(t_tp_raw: int, ep_len: int, span: int):
 
 
 @torch.no_grad()
-def _encode_batch(jepa, ds, ep_idx, start, span):
+def _encode_batch(jepa, ds, ep_idx, start, span, mask_teleport=False, tp_bbox=None):
     chunk = ds.load_chunk(np.array(ep_idx), np.array(start), np.array(start) + span)
     pixels = torch.stack([c["pixels"] for c in chunk]).to(_DEVICE)
     action = torch.stack([c["action"] for c in chunk]).to(_DEVICE)
+    if mask_teleport:
+        pixels = _mask_tp(pixels, tp_bbox)
     out = jepa.encode({"pixels": pixels, "action": action})
     return out["emb"], out["act_emb"]
 
@@ -85,24 +97,48 @@ def main():
                          help="DataLoader batches for training the baseline hue/delta probes (default: 200)")
     parser.add_argument("--batch-size", type=int, default=16,
                          help="Episodes per encode() call (default: 16)")
+    parser.add_argument("--mask-teleport", action="store_true",
+                         help=(
+                             "Option A protocol: zero out the teleport-pixel patch "
+                             "before every encode() call (baseline probes AND fact/cf "
+                             "windows). This is the paper's primary Ladder 3 test -- "
+                             "run this in addition to the unmasked sanity-check baseline."
+                         ))
     parser.add_argument("--no-wandb", action="store_true")
     args = parser.parse_args()
 
     import stable_worldmodel as swm
     import h5py
 
+    suffix = "_masked" if args.mask_teleport else ""
     out_dir = Path(args.ckpt_path).parent
     print(f"Device   : {_DEVICE}")
     print(f"Output   : {out_dir}")
+    print(f"Mask TP  : {args.mask_teleport}")
+
+    # -----------------------------------------------------------------
+    # Stage 0 -- detect teleport patch bbox (only when masking is requested)
+    # -----------------------------------------------------------------
+    tp_bbox = None
+    if args.mask_teleport:
+        dataset_path = str(swm.data.utils.get_cache_dir() / f"{_DATASET_NAME}.h5")
+        print(f"\n[0/4] Detecting teleport patch bbox from {dataset_path} ...")
+        tp_bbox = _detect_teleport_bbox(dataset_path)
+        r0, r1, c0, c1 = tp_bbox
+        print(f"      pixel bbox  rows [{r0}:{r1}], cols [{c0}:{c1}]")
 
     # -----------------------------------------------------------------
     # Stage 1 -- load model + baseline hue/delta probes (same data/code
-    # path as the already-reported translation baseline)
+    # path as the already-reported translation baseline, masked the same
+    # way Option A masks probe training when --mask-teleport is passed)
     # -----------------------------------------------------------------
     print("\n[1/4] Loading checkpoint + baseline probes ...")
     jepa = _load_model(args.ckpt_path)
     baseline_loader = _make_loader(dataset_name=_DATASET_NAME, seed=42)
-    z_all, hue_all, pos_all, max_deltas = _extract_probe_data(jepa, baseline_loader, args.n_probe_batches)
+    z_all, hue_all, pos_all, max_deltas = _extract_probe_data(
+        jepa, baseline_loader, args.n_probe_batches,
+        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+    )
     (probe_pos, probe_hue, scaler, pos_r2, hue_acc, hue_dir, delta_hue, pos_dirs) = _train_probes(z_all, hue_all, pos_all)
     print(f"      Position R^2 = {pos_r2:.4f}   Hue accuracy = {hue_acc:.4f}")
     baseline_transform = baseline_loader.dataset.transform
@@ -172,8 +208,10 @@ def main():
         starts = [w[1] for w in batch]
         enc_idxs = [w[2] for w in batch]
 
-        emb_fact, act_emb_fact = _encode_batch(jepa, ds_fact, eps, starts, span)
-        emb_cf, _ = _encode_batch(jepa, ds_cf, eps, starts, span)
+        emb_fact, act_emb_fact = _encode_batch(jepa, ds_fact, eps, starts, span,
+                                                mask_teleport=args.mask_teleport, tp_bbox=tp_bbox)
+        emb_cf, _ = _encode_batch(jepa, ds_cf, eps, starts, span,
+                                   mask_teleport=args.mask_teleport, tp_bbox=tp_bbox)
 
         for j, enc_idx in enumerate(enc_idxs):
             ctx_start = max(0, enc_idx - _HISTORY_SIZE)
@@ -219,6 +257,7 @@ def main():
         return {"mean": float(np.mean(arr)), "std": float(np.std(arr)), "n": len(arr)}
 
     metrics = {
+        "mask_teleport": bool(args.mask_teleport),
         "n_episodes_collected": int(n_episodes),
         "n_episodes_usable": len(windows),
         "n_excluded_no_teleport": int(n_no_teleport),
@@ -228,12 +267,18 @@ def main():
         "translation_approx_error_normalized": _summ(approx_err_norm),
         "surprise_ratio_translation_baseline": _ratio_summ(ratio_translation),
         "surprise_ratio_true_counterfactual": _ratio_summ(ratio_true),
+        # NOTE (interpretation, not just a raw stat): per-episode mean-of-ratios
+        # is noisier and runs systematically higher than ratio-of-means (see
+        # reports/testladder.md's multi-seed study -- up to 14x for Baseline).
+        # Treat these booleans as secondary evidence; the magnitude comparison
+        # (rt['mean'] vs ru['mean']) and the approximation-error metric above
+        # are the primary evidence for whether the verdict actually changes.
         "ratio_crosses_one_translation": bool(np.mean(ratio_translation) >= 1.0),
         "ratio_crosses_one_true": bool(np.mean(ratio_true) >= 1.0),
     }
 
     print("\n" + "=" * 66)
-    print("  THEME D -- PAIRED GROUND-TRUTH COUNTERFACTUAL VALIDATION")
+    print(f"  THEME D -- PAIRED GROUND-TRUTH COUNTERFACTUAL VALIDATION{'  (MASKED)' if args.mask_teleport else '  (unmasked baseline)'}")
     print("=" * 66)
     print(f"  Usable episodes (of {n_episodes} collected): {len(windows)}")
     print(f"  ||z_cf_translation - z_cf_true||   "
@@ -244,33 +289,34 @@ def main():
           f"{metrics['translation_approx_error_normalized']['mean']:.4f}")
     rt = metrics["surprise_ratio_translation_baseline"]
     ru = metrics["surprise_ratio_true_counterfactual"]
-    print(f"  Surprise ratio (translation ctx_cf):  {rt['mean']:.4f} ± {rt['std']:.4f}  (N={rt['n']})"
-          f"  crosses 1.0: {metrics['ratio_crosses_one_translation']}")
-    print(f"  Surprise ratio (REAL ctx_cf_true):     {ru['mean']:.4f} ± {ru['std']:.4f}  (N={ru['n']})"
-          f"  crosses 1.0: {metrics['ratio_crosses_one_true']}")
+    print(f"  Surprise ratio magnitude comparison (primary evidence):")
+    print(f"    translation ctx_cf:  {rt['mean']:.4f} ± {rt['std']:.4f}  (N={rt['n']})")
+    print(f"    REAL ctx_cf_true:    {ru['mean']:.4f} ± {ru['std']:.4f}  (N={ru['n']})")
+    print(f"  'Crosses 1.0' booleans (secondary -- mean-of-ratios is noisy, see caveat in JSON):")
+    print(f"    translation: {metrics['ratio_crosses_one_translation']}   real: {metrics['ratio_crosses_one_true']}")
     verdict_changed = metrics["ratio_crosses_one_translation"] != metrics["ratio_crosses_one_true"]
-    print(f"  Verdict changed by using the real counterfactual: {verdict_changed}")
+    print(f"  Boolean verdict changed by using the real counterfactual: {verdict_changed}")
     print("=" * 66)
 
-    results_path = out_dir / "theme_d_paired_results.json"
+    results_path = out_dir / f"theme_d_paired_results{suffix}.json"
     with open(results_path, "w") as f:
         json.dump({"checkpoint": str(args.ckpt_path), "paired_dataset": args.paired_dataset_name,
                    "metrics": metrics}, f, indent=2)
     print(f"\nResults  -> {results_path}")
 
     print("\n[4/4] Saving plots ...")
-    _plot_approx_error(approx_err, approx_err_norm, out_dir)
-    _plot_ratio_comparison(ratio_translation, ratio_true, out_dir)
-    print(f"Plots    -> {out_dir}/theme_d_approx_error.pdf / .png")
-    print(f"         -> {out_dir}/theme_d_ratio_comparison.pdf / .png")
+    _plot_approx_error(approx_err, approx_err_norm, out_dir, suffix)
+    _plot_ratio_comparison(ratio_translation, ratio_true, out_dir, suffix)
+    print(f"Plots    -> {out_dir}/theme_d_approx_error{suffix}.pdf / .png")
+    print(f"         -> {out_dir}/theme_d_ratio_comparison{suffix}.pdf / .png")
 
     if not args.no_wandb:
-        _log_to_wandb(metrics, args.ckpt_path, out_dir)
+        _log_to_wandb(metrics, args.ckpt_path, out_dir, suffix)
 
     return metrics
 
 
-def _plot_approx_error(approx_err, approx_err_norm, out_dir: Path):
+def _plot_approx_error(approx_err, approx_err_norm, out_dir: Path, suffix: str = ""):
     _setup_pub_style()
     fig, axes = plt.subplots(1, 2, figsize=(6.0, 2.7))
     for ax, data, title in [
@@ -283,10 +329,10 @@ def _plot_approx_error(approx_err, approx_err_norm, out_dir: Path):
         ax.set_title(title, fontsize=8)
         _despine(ax)
     fig.tight_layout()
-    _save_fig(fig, out_dir, "theme_d_approx_error")
+    _save_fig(fig, out_dir, f"theme_d_approx_error{suffix}")
 
 
-def _plot_ratio_comparison(ratio_translation, ratio_true, out_dir: Path):
+def _plot_ratio_comparison(ratio_translation, ratio_true, out_dir: Path, suffix: str = ""):
     _setup_pub_style()
     fig, ax = plt.subplots(figsize=(3.5, 2.7))
     labels = ["Translation\n(existing)", "Real ground-truth\n(Theme D)"]
@@ -299,23 +345,24 @@ def _plot_ratio_comparison(ratio_translation, ratio_true, out_dir: Path):
     ax.set_ylabel("Per-episode surprise ratio (cf / fact)")
     _despine(ax)
     fig.tight_layout()
-    _save_fig(fig, out_dir, "theme_d_ratio_comparison")
+    _save_fig(fig, out_dir, f"theme_d_ratio_comparison{suffix}")
 
 
-def _log_to_wandb(metrics, ckpt_path, out_dir: Path):
+def _log_to_wandb(metrics, ckpt_path, out_dir: Path, suffix: str = ""):
     import wandb
 
     run_tag = Path(ckpt_path).parent.name
     run = wandb.init(
         project="lewm-causality",
         entity="paoloai-robomotic",
-        name=f"theme_d_{run_tag}",
-        tags=["causal_test", "aap", "theme_d", "ground_truth_counterfactual"],
-        config={"checkpoint": str(ckpt_path)},
+        name=f"theme_d_{run_tag}{suffix}",
+        tags=["causal_test", "aap", "theme_d", "ground_truth_counterfactual"]
+              + (["masked_teleport"] if suffix else []),
+        config={"checkpoint": str(ckpt_path), "mask_teleport": bool(suffix)},
     )
     payload = {f"theme_d/{k}": v for k, v in metrics.items() if isinstance(v, (int, float, bool))}
     for stem in ("theme_d_approx_error", "theme_d_ratio_comparison"):
-        p = out_dir / f"{stem}.png"
+        p = out_dir / f"{stem}{suffix}.png"
         if p.exists():
             payload[f"theme_d/{stem}"] = wandb.Image(str(p))
     wandb.log(payload)

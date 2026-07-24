@@ -490,6 +490,15 @@ far room, so the expert policy actually needs the teleport shortcut; episodes wi
 event are discarded rather than collected, so `--n-episodes` means usable (teleported) episodes,
 matching how `--n-aap-episodes` is already interpreted elsewhere in this pipeline.
 
+**`--mask-teleport` is the primary run, not the unmasked one.** `research/theme_d_paired_validation.py`
+supports the same Option A protocol used throughout this pipeline: zero out the teleport-pixel patch
+before every `encode()` call (both baseline-probe training and fact/cf window encoding), forcing the
+model to rely on latent inference rather than the direct pixel cue. The paper's actual Ladder 3 test
+— what CMTV is skeptical of — is Option A/B/C+A under masking; the unmasked run is included only as a
+sanity-check baseline (same framing as the paper's own "Level 3 Probing" section). Both must be run to
+get the full picture; a GPU job that only runs unmasked leaves the condition that actually matters
+untouched.
+
 `research/theme_d_paired_validation.py` then encodes both the factual and the real counterfactual
 context windows with the frozen checkpoint (no retraining) and reports two things, mirroring
 `_run_aap_cycle`'s exact formula structure with only the counterfactual context swapped in:
@@ -502,25 +511,44 @@ context windows with the frozen checkpoint (no retraining) and reports two thing
 - **(B) Surprise ratio, translation vs. real counterfactual** — the per-episode ratio
   $r_i = \mathrm{surprise}_\mathrm{cf} / \mathrm{surprise}_\mathrm{fact}$ recomputed with
   `ctx_cf` swapped from $\mathrm{ctx} + \Delta_\mathrm{hue}$ to the real encoded counterfactual
-  context, keeping `tgt` (the real factual outcome) identical in both branches — and whether the
-  "ratio crosses 1.0" verdict changes.
+  context, keeping `tgt` (the real factual outcome) identical in both branches. Reported as both a
+  "crosses 1.0" boolean and the raw mean ± std. **Treat the boolean as secondary evidence** — the
+  multi-seed study above already showed per-episode mean-of-ratios runs higher and noisier than
+  ratio-of-means (up to 14× for Baseline; same caveat as Table 6). The magnitude comparison
+  (translation mean vs. real-counterfactual mean) and metric (A) above are the primary evidence for
+  whether the verdict actually changes.
 
 ### Results
 
-*(Pending the full N=200 run — this section will be populated with real numbers.)*
+*(Pending the full N=200 runs — this section will be populated with real numbers from BOTH the
+masked (primary) and unmasked (sanity-check) validation calls.)*
+
+**Masked (primary Ladder 3 test — Option A protocol):**
 
 | Metric | Translation baseline | Real counterfactual (Theme D) |
 |---|---|---|
 | $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ (mean / median / p90) | — | *TBD* |
 | normalized by $\lVert \Delta_\mathrm{hue} \rVert$ | — | *TBD* |
 | Surprise ratio (mean ± std, N episodes) | *TBD* | *TBD* |
-| Ratio crosses 1.0? | *TBD* | *TBD* |
+| Ratio crosses 1.0? (secondary — see caveat above) | *TBD* | *TBD* |
 
-**Verdict — *TBD once run*.** If the Level 3 failure conclusion (ratio ≥ 1.0, no residual latent
-causal structure) holds under both the translation-based and the real counterfactual, that is a
-reviewer-proof result — direct confirmation that the translation approximation used throughout
-this pipeline was not artificially inflating or deflating the surprise ratio. If the verdict
-flips, that is an important finding in its own right and would need its own writeup.
+**Unmasked (sanity-check baseline only):**
+
+| Metric | Translation baseline | Real counterfactual (Theme D) |
+|---|---|---|
+| $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ (mean / median / p90) | — | *TBD* |
+| normalized by $\lVert \Delta_\mathrm{hue} \rVert$ | — | *TBD* |
+| Surprise ratio (mean ± std, N episodes) | *TBD* | *TBD* |
+| Ratio crosses 1.0? (secondary — see caveat above) | *TBD* | *TBD* |
+
+**Verdict — *TBD once run*.** The masked condition is the one that actually stress-tests what CMTV
+is skeptical of; lead with it, not the unmasked sanity-check. If the Level 3 failure conclusion
+(no residual latent causal structure, judged primarily by the magnitude comparison and the
+approximation-error metric — not the "crosses 1.0" boolean alone) holds under both the
+translation-based and the real counterfactual, that is a reviewer-proof result — direct
+confirmation that the translation approximation used throughout this pipeline was not artificially
+inflating or deflating the surprise ratio. If the verdict flips, that is an important finding in
+its own right and would need its own writeup.
 
 ### Known limitations (flag alongside any results, not a clean-pass caveat)
 
@@ -537,13 +565,19 @@ flips, that is an important finding in its own right and would need its own writ
   that the ground-truth `teleport_step` used for windowing is pixel-accurate; this only affects the
   collection-time proprio field, which is never used past the pre-teleport identity sanity check
   (itself unaffected, since the lag is identical in both paired rollouts before any divergence).
+- **Per-episode mean-of-ratios is noisy** — reported alongside the "crosses 1.0" boolean, but per
+  the multi-seed statistical study above, this metric formulation runs systematically higher and
+  noisier than ratio-of-means. Lead with the raw mean ± std magnitude comparison and metric (A)
+  when writing up results, not the boolean crossing in isolation (same caveat as Table 6).
 
 ### Reproduce
 
 ```
 modal run modaldotcom/app.py --do-collect-theme-d
+modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50 --mask-theme-d
 modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
 ```
 
-Results: `theme_d_paired_results.json` and `theme_d_approx_error.pdf` / `theme_d_ratio_comparison.pdf`
-(`.png`) on the `swm-cache` volume alongside the checkpoint.
+Results: `theme_d_paired_results.json` / `theme_d_paired_results_masked.json` and
+`theme_d_approx_error[_masked].pdf` / `theme_d_ratio_comparison[_masked].pdf` (`.png`) on the
+`swm-cache` volume alongside the checkpoint.
