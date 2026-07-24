@@ -54,6 +54,16 @@ Theme C — validate the hue intervention itself (on-manifold + single-factor ch
     modal run modaldotcom/app.py --do-causal-test \\
         --policy lewm_epoch_50 --extended-validation
 
+Theme D — paired factual/counterfactual ground-truth trajectories (CMTV Critical):
+    No retraining. Collects real paired rollouts (same seed/start/actions,
+    hue + teleport-gating flipped per the training confound) directly from
+    GlitchedHueTwoRoom-v1, then compares the model's prediction against a
+    REAL encoded counterfactual frame instead of the translation-based
+    z_cf = z_fact + delta_hue used everywhere else.
+
+    modal run modaldotcom/app.py --do-collect-theme-d
+    modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
+
 Other commands
 --------------
     modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb   # smoke test
@@ -432,6 +442,108 @@ def remerge_optionc() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Theme D — paired factual/counterfactual ground-truth trajectories (no GPU
+# for collection; GPU for the encode/predict comparison)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={CACHE_DIR: volume},
+    env=ENV,
+    timeout=14400,  # 4 h ceiling -- teleport hit rate is ~20-30%, so 200 usable
+                    # episodes needs on the order of ~1000 attempted rollouts
+)
+def collect_theme_d(n_episodes: int = 200, episode_len: int = 100, seed: int = 42) -> str:
+    """Collect the Theme D paired factual/counterfactual dataset on a cloud CPU worker.
+
+    Runs research/collect_theme_d_paired.py, which drives two envs (factual:
+    blue/teleport-enabled, counterfactual: green/teleport-disabled) through an
+    identical seed + action sequence, recording only episodes where a teleport
+    actually fires. Args:
+        n_episodes:  Target number of USABLE (teleported) paired episodes.
+        episode_len: Raw env steps per episode (default: 100, matches
+                     world.max_episode_steps in glitched_hue.yaml).
+        seed:        Base seed; attempt i uses seed+i.
+
+    Returns:
+        Absolute path of the factual HDF5 file on the volume (the paired
+        counterfactual file sits alongside it, same prefix + "_cf.h5").
+    """
+    import subprocess
+    cmd = [
+        "python", "research/collect_theme_d_paired.py",
+        f"--n-episodes={n_episodes}",
+        f"--episode-len={episode_len}",
+        f"--seed={seed}",
+    ]
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd="/workspace")
+    volume.commit()
+    out = f"{CACHE_DIR}/glitched_hue_theme_d_fact.h5"
+    print(f"\n✅ Paired dataset written to volume: {out}  (+ _cf.h5 alongside it)")
+    return out
+
+
+@app.function(
+    image=image,
+    gpu="A10G",
+    volumes={CACHE_DIR: volume},
+    secrets=[wandb_secret],
+    env=ENV,
+    timeout=3600,
+)
+def theme_d_validate(
+    policy: str,
+    paired_dataset_name: str = "glitched_hue_theme_d",
+    n_probe_batches: int = 200,
+    no_wandb: bool = False,
+) -> str:
+    """Run research/theme_d_paired_validation.py on a cloud A10G.
+
+    Compares the model's prediction against a REAL encoded counterfactual
+    frame from the paired dataset (collect_theme_d), instead of the
+    translation-based z_cf = z_fact + delta_hue used by causal_test(). Writes
+    theme_d_paired_results.json plus two diagnostic plots to the volume
+    alongside the checkpoint.
+
+    Args:
+        policy:               Checkpoint path relative to STABLEWM_HOME,
+                               without the '_object.ckpt' suffix.
+        paired_dataset_name:  Prefix used by collect_theme_d (default:
+                               glitched_hue_theme_d).
+        no_wandb:              If True, skip W&B logging (dry run).
+
+    Returns:
+        Absolute path of the JSON results file written to the volume.
+    """
+    import os
+
+    ckpt_path = f"{CACHE_DIR}/{policy}_object.ckpt"
+    if not os.path.exists(ckpt_path):
+        raise FileNotFoundError(
+            f"Checkpoint not found on volume: {ckpt_path}\n"
+            "Verify the policy path and that the volume is mounted."
+        )
+
+    cmd = [
+        "python", "research/theme_d_paired_validation.py", ckpt_path,
+        "--paired-dataset-name", paired_dataset_name,
+        "--n-probe-batches", str(n_probe_batches),
+    ]
+    if no_wandb:
+        cmd.append("--no-wandb")
+
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd="/workspace")
+
+    volume.commit()
+
+    results_file = f"{CACHE_DIR}/{os.path.dirname(policy)}/theme_d_paired_results.json"
+    print(f"\n✅ Theme D validation complete. Results: {results_file}")
+    return results_file
+
+
+# ---------------------------------------------------------------------------
 # Stats function  (no GPU — pure WandB API query)
 # ---------------------------------------------------------------------------
 
@@ -801,6 +913,8 @@ def main(
     do_remerge_optionc: bool = False,
     do_audit: bool = False,
     do_statistical_study: bool = False,
+    do_collect_theme_d: bool = False,
+    do_theme_d_validate: bool = False,
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
@@ -813,6 +927,9 @@ def main(
     mask_teleport_prob: float = 0.0,
     sigreg_weight: float = 0.09,
     optionc_episodes: int = 5000,
+    theme_d_episodes: int = 200,
+    theme_d_episode_len: int = 100,
+    theme_d_dataset_name: str = "glitched_hue_theme_d",
     study_seeds: str = "3072,1234,5678",
     study_epochs: int = 50,
     study_n_aap: int = 200,
@@ -869,12 +986,18 @@ def main(
 
     # Theme C — on-manifold check + extra-factor probes (no retraining)
     modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --extended-validation
+
+    # Theme D — paired factual/counterfactual ground-truth trajectories (no retraining)
+    modal run modaldotcom/app.py --do-collect-theme-d
+    modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
     """
     if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect,
-                do_collect_optionc, do_remerge_optionc, do_audit, do_statistical_study]):
+                do_collect_optionc, do_remerge_optionc, do_audit, do_statistical_study,
+                do_collect_theme_d, do_theme_d_validate]):
         print(
             "Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, "
-            "--do-inspect, --do-collect-optionc, or --do-statistical-study."
+            "--do-inspect, --do-collect-optionc, --do-statistical-study, "
+            "--do-collect-theme-d, or --do-theme-d-validate."
         )
         return
 
@@ -908,6 +1031,25 @@ def main(
     if do_remerge_optionc:
         out = remerge_optionc.remote()
         print(f"Option C merged dataset on volume: {out}")
+
+    if do_collect_theme_d:
+        out = collect_theme_d.remote(
+            n_episodes=theme_d_episodes,
+            episode_len=theme_d_episode_len,
+        )
+        print(f"Theme D paired dataset on volume: {out}")
+
+    if do_theme_d_validate:
+        if not policy:
+            print("--do-theme-d-validate requires --policy <path>. Example:")
+            print("  modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50")
+            return
+        results_file = theme_d_validate.remote(
+            policy=policy,
+            paired_dataset_name=theme_d_dataset_name,
+            no_wandb=no_wandb,
+        )
+        print(f"Theme D results file on volume: {results_file}")
 
     if do_causal_test:
         if not policy:

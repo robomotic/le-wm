@@ -446,3 +446,104 @@ modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --extended-
 
 Results: `causal_test_results.json` (`on_manifold`, `factor_probes`, `factor_invariance` keys)
 and `on_manifold.pdf` / `.png` on the `swm-cache` volume alongside the checkpoint.
+
+## Theme D — Paired factual/counterfactual ground-truth trajectories (2026-07-24)
+
+CMTV's remaining Critical item: *"Where possible, generate paired factual and counterfactual
+trajectories in the environment. This would allow the model's prediction to be compared directly
+with a ground-truth counterfactual outcome."* Every metric above — including Theme C's own
+on-manifold check — validates $z_\mathrm{cf} = z_\mathrm{fact} + \Delta_\mathrm{hue}$ against
+itself (a reference manifold, a random-direction control, extra-factor probes). None of them ever
+compare against a *real* encoder output of an actually-different rollout. Theme D closes that gap.
+
+### Methodology
+
+For a sample of episodes, both hue variants of the identical rollout are generated directly from
+`GlitchedHueTwoRoomEnv`: same seed, same start state, same action sequence, hue **and**
+teleport-gating flipped together per the real training confound (blue↔teleport-enabled,
+green↔teleport-disabled — the same convention as `glitched_hue_tworoom_half`, not Option C's
+reversed pairing). Two facts make this possible without touching the model:
+
+- `stable_worldmodel/spaces.py`'s `Dict.update()` resamples in the space's fixed canonical
+  `sampling_order`, filtered by the *set* of `variation` keys passed to `reset()` — not by list
+  order. Two resets with the same seed and the same key set therefore draw bit-identical
+  agent/target start positions, regardless of what's also overridden via `variation_values`
+  (a pure, non-RNG assignment). `background.color` only affects rendering; it never touches
+  physics.
+- `GlitchedHueTwoRoomEnv.step()` runs base physics first, then applies the teleport mirror-jump
+  conditionally on `teleport.enabled` — so two envs seeded identically and driven by an identical
+  action array stay physically identical until the factual env's teleport actually fires.
+  Divergence from that point on *is* the real counterfactual outcome, not noise.
+
+The one piece that isn't free: actions. `GlitchedHueExpertPolicy` branches its steering on
+`teleport.enabled`, so invoking the policy separately per condition — even with matched seeds —
+silently breaks pairing. `research/collect_theme_d_paired.py` instead runs the real
+`GlitchedHueExpertPolicy` (`action_noise=0.5`, `action_repeat_prob=0.05`, matching
+`glitched_hue_half.yaml` exactly, so actions stay in-distribution with the actual training data)
+open-loop on the factual env only, records the resulting action array, and replays it verbatim via
+`env.step(action[t])` on the counterfactual env — never re-invoking the policy.
+
+A pre-teleport proprio-identity check runs per episode (both rollouts must be bit-identical up to
+the teleport step) as a direct empirical test of the RNG-identity claim above, not just a
+theoretical one. Only ~20–30% of randomly-sampled agent/target placements put the target in the
+far room, so the expert policy actually needs the teleport shortcut; episodes without a teleport
+event are discarded rather than collected, so `--n-episodes` means usable (teleported) episodes,
+matching how `--n-aap-episodes` is already interpreted elsewhere in this pipeline.
+
+`research/theme_d_paired_validation.py` then encodes both the factual and the real counterfactual
+context windows with the frozen checkpoint (no retraining) and reports two things, mirroring
+`_run_aap_cycle`'s exact formula structure with only the counterfactual context swapped in:
+
+- **(A) Translation-approximation error** — $\lVert z_\mathrm{cf}^{\mathrm{transl}} -
+  z_\mathrm{cf}^{\mathrm{true}} \rVert$, i.e. how far the existing linear-translation
+  approximation sits from the real encoder output of the paired counterfactual frame, in the same
+  latent-space units as Theme C's on-manifold distances (also reported normalized by
+  $\lVert \Delta_\mathrm{hue} \rVert$).
+- **(B) Surprise ratio, translation vs. real counterfactual** — the per-episode ratio
+  $r_i = \mathrm{surprise}_\mathrm{cf} / \mathrm{surprise}_\mathrm{fact}$ recomputed with
+  `ctx_cf` swapped from $\mathrm{ctx} + \Delta_\mathrm{hue}$ to the real encoded counterfactual
+  context, keeping `tgt` (the real factual outcome) identical in both branches — and whether the
+  "ratio crosses 1.0" verdict changes.
+
+### Results
+
+*(Pending the full N=200 run — this section will be populated with real numbers.)*
+
+| Metric | Translation baseline | Real counterfactual (Theme D) |
+|---|---|---|
+| $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ (mean / median / p90) | — | *TBD* |
+| normalized by $\lVert \Delta_\mathrm{hue} \rVert$ | — | *TBD* |
+| Surprise ratio (mean ± std, N episodes) | *TBD* | *TBD* |
+| Ratio crosses 1.0? | *TBD* | *TBD* |
+
+**Verdict — *TBD once run*.** If the Level 3 failure conclusion (ratio ≥ 1.0, no residual latent
+causal structure) holds under both the translation-based and the real counterfactual, that is a
+reviewer-proof result — direct confirmation that the translation approximation used throughout
+this pipeline was not artificially inflating or deflating the surprise ratio. If the verdict
+flips, that is an important finding in its own right and would need its own writeup.
+
+### Known limitations (flag alongside any results, not a clean-pass caveat)
+
+- **Single collection seed, N one-off validation** — unlike the multi-seed Option B/C statistical
+  study, Theme D's numbers come from one checkpoint and one paired-collection seed. Label
+  accordingly; a second collection seed would let a std-dev be reported the same way the
+  per-episode ratio already is.
+- **Action distribution**: actions come from the real expert policy (in-distribution with
+  training), but the specific trajectories collected are still a fresh, independently-drawn sample
+  — not a resample of the exact episodes the reported baseline ratio was computed on.
+- **`info["proprio"]` lags pixels by one step at the exact teleport frame** — an upstream
+  `GlitchedHueTwoRoomEnv` quirk (`super().step()` builds `info` before the teleport mirror is
+  applied; only `obs`/pixels are re-rendered post-mirror). Verified via frame-to-frame pixel diffs
+  that the ground-truth `teleport_step` used for windowing is pixel-accurate; this only affects the
+  collection-time proprio field, which is never used past the pre-teleport identity sanity check
+  (itself unaffected, since the lag is identical in both paired rollouts before any divergence).
+
+### Reproduce
+
+```
+modal run modaldotcom/app.py --do-collect-theme-d
+modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
+```
+
+Results: `theme_d_paired_results.json` and `theme_d_approx_error.pdf` / `theme_d_ratio_comparison.pdf`
+(`.png`) on the `swm-cache` volume alongside the checkpoint.

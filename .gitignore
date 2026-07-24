@@ -22,3 +22,6 @@ wandb/
 .vscode/
 .idea/
 *.swp
+
+# TMLR paper + reviewer feedback (private, not pushed to remote)
+tlmr/
