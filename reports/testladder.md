@@ -518,37 +518,71 @@ context windows with the frozen checkpoint (no retraining) and reports two thing
   (translation mean vs. real-counterfactual mean) and metric (A) above are the primary evidence for
   whether the verdict actually changes.
 
-### Results
+### Results (2026-07-24, checkpoint `lewm_epoch_50`, N=200 collected / 126 usable per condition)
 
-*(Pending the full N=200 runs — this section will be populated with real numbers from BOTH the
-masked (primary) and unmasked (sanity-check) validation calls.)*
+74/200 episodes were excluded per condition (`no valid window`, not `no teleport` or `invalid
+pair` — those were both 0/200): the teleport fired too close to either end of the 100-step episode
+to fit the required `enc_idx ∈ [2, 5]` context margin. Pre-teleport identity check: 200/200 (100%)
+in both runs — the RNG-identity pairing mechanism held on the real Modal collection run, not just
+in local smoke tests.
 
 **Masked (primary Ladder 3 test — Option A protocol):**
 
 | Metric | Translation baseline | Real counterfactual (Theme D) |
 |---|---|---|
-| $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ (mean / median / p90) | — | *TBD* |
-| normalized by $\lVert \Delta_\mathrm{hue} \rVert$ | — | *TBD* |
-| Surprise ratio (mean ± std, N episodes) | *TBD* | *TBD* |
-| Ratio crosses 1.0? (secondary — see caveat above) | *TBD* | *TBD* |
+| $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ (mean / median / p90) | — | 21.36 / 21.36 / 21.87 |
+| normalized by $\lVert \Delta_\mathrm{hue} \rVert = 3.499$ | — | 6.11× |
+| Surprise ratio (mean ± std, N=126) | 0.505 ± 0.589 | **11.04 ± 10.57** |
+| Ratio crosses 1.0? (secondary) | False | **True** |
 
 **Unmasked (sanity-check baseline only):**
 
 | Metric | Translation baseline | Real counterfactual (Theme D) |
 |---|---|---|
-| $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ (mean / median / p90) | — | *TBD* |
-| normalized by $\lVert \Delta_\mathrm{hue} \rVert$ | — | *TBD* |
-| Surprise ratio (mean ± std, N episodes) | *TBD* | *TBD* |
-| Ratio crosses 1.0? (secondary — see caveat above) | *TBD* | *TBD* |
+| $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ (mean / median / p90) | — | 22.13 / 22.13 / 22.54 |
+| normalized by $\lVert \Delta_\mathrm{hue} \rVert = 3.588$ | — | 6.17× |
+| Surprise ratio (mean ± std, N=126) | 6.23 ± 7.53 | **275.74 ± 256.87** |
+| Ratio crosses 1.0? (secondary) | True | True (unchanged) |
 
-**Verdict — *TBD once run*.** The masked condition is the one that actually stress-tests what CMTV
-is skeptical of; lead with it, not the unmasked sanity-check. If the Level 3 failure conclusion
-(no residual latent causal structure, judged primarily by the magnitude comparison and the
-approximation-error metric — not the "crosses 1.0" boolean alone) holds under both the
-translation-based and the real counterfactual, that is a reviewer-proof result — direct
-confirmation that the translation approximation used throughout this pipeline was not artificially
-inflating or deflating the surprise ratio. If the verdict flips, that is an important finding in
-its own right and would need its own writeup.
+**Verdict — the translation approximation systematically understates the model's true
+counterfactual fragility, and in the masked (primary) condition this flips the boolean verdict.**
+Three findings, in order of how much weight each should carry:
+
+1. **The approximation error is large in absolute terms, not just detectably nonzero.**
+   $\lVert z_\mathrm{cf}^{\mathrm{transl}} - z_\mathrm{cf}^{\mathrm{true}} \rVert$ is ~6.1–6.2×
+   $\lVert \Delta_\mathrm{hue} \rVert$ itself in both conditions — the translated point sits
+   several hue-shift-lengths away from where the real green-room encoder output actually lands.
+   This is a considerably starker number than Theme C's on-manifold check suggested (which found
+   $z_\mathrm{cf}$ plausibly on-manifold under Mahalanobis distance); "on-manifold" and "close to
+   the real counterfactual" are evidently different properties.
+2. **The real counterfactual produces far more surprise than the translation predicts, in both
+   conditions** — ~22× higher under masking (11.04 vs. 0.505), ~44× higher unmasked (275.74 vs.
+   6.23). The translation-based metric used throughout every prior section of this report has been
+   *underestimating* how badly the model's predictions degrade under a true room-color-and-gating
+   intervention.
+3. **Under the masked condition specifically — the paper's actual primary claim — this
+   underestimate is large enough to flip the qualitative verdict**: the translation-based ratio
+   (0.505, below 1.0) reads as weak residual Ladder 3 evidence; the real ground-truth counterfactual
+   (11.04, far above 1.0) reads as unambiguous absence of latent causal structure. Under the
+   unmasked condition both already agreed on "no Ladder 3 structure" (both cross 1.0), so the
+   boolean doesn't flip there, but the 44× magnitude gap still means the unmasked numbers reported
+   elsewhere in this document likely *understate* the model's true shortcut reliance.
+
+Net effect on the paper's thesis: **this does not undermine the Level 3 failure conclusion — it
+strengthens it.** The model is shown to be more reliant on the hue/pixel shortcut and less
+causally competent than the translation-based approximation indicated, under the exact protocol
+(masked, Option A) that constitutes the paper's strongest claim. The appropriate framing for the
+writeup is not "the translation approximation was validated" but "the translation approximation
+was conservative — the real effect is larger, and where it mattered (masked), large enough to
+change which side of the ratio=1.0 line the result falls on."
+
+One caveat on the numbers themselves: the real-counterfactual ratio's std is comparable to or
+larger than its mean in both conditions (10.57 vs. 11.04; 256.87 vs. 275.74), consistent with the
+"mean-of-ratios is noisy" caveat above — the distribution is likely right-skewed, with a subset of
+episodes (large post-teleport divergence, e.g. long-range mirror-jumps) contributing
+disproportionately to the mean. A follow-up reporting the median ratio alongside mean ± std would
+make this more robust, though the qualitative direction (real ≫ translation, by an order of
+magnitude or more) is unambiguous regardless.
 
 ### Known limitations (flag alongside any results, not a clean-pass caveat)
 
