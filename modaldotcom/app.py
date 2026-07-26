@@ -67,6 +67,21 @@ Theme D — paired factual/counterfactual ground-truth trajectories (CMTV Critic
     modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50 --mask-theme-d
     modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
 
+Theme E — masking-artifact control (reviewer 2ziA):
+    No retraining, no new data. Reuses --do-causal-test with the same masking
+    protocol Options A/B/C+A already use, but relocates the mask to a fixed,
+    causally-irrelevant corner (--mask-location irrelevant) and/or swaps the
+    fill value from the global ImageNet-mean "zero" to a per-frame local
+    neighborhood mean (--mask-fill local_mean). If the surprise ratio moves
+    meaningfully even for the irrelevant patch, part of the masked-condition
+    effect elsewhere in this report is a masking artifact, not the causal
+    information removed.
+
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 \\
+        --mask-causal-test --mask-location irrelevant
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 \\
+        --mask-causal-test --mask-location irrelevant --mask-fill local_mean
+
 Other commands
 --------------
     modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb   # smoke test
@@ -682,6 +697,8 @@ def causal_test(
     policy: str,
     no_wandb: bool = False,
     mask_teleport: bool = False,
+    mask_location: str = "teleport",
+    mask_fill: str = "zero",
     dataset_name: str = "glitched_hue_tworoom_half",
     n_aap_episodes: int = 200,
     extended_validation: bool = False,
@@ -694,10 +711,17 @@ def causal_test(
     diagnostic plots to the volume alongside the checkpoint.
 
     Args:
-        policy:    Checkpoint path relative to STABLEWM_HOME, without the
-                   '_object.ckpt' suffix.
-                   Example: '2024-01-01/0/lewm_epoch_50'
-        no_wandb:  If True, skip W&B logging (dry run).
+        policy:         Checkpoint path relative to STABLEWM_HOME, without the
+                        '_object.ckpt' suffix.
+                        Example: '2024-01-01/0/lewm_epoch_50'
+        no_wandb:       If True, skip W&B logging (dry run).
+        mask_location:  Theme E masking-artifact control (reviewer 2ziA):
+                        "teleport" (default) or "irrelevant" (same-sized patch
+                        at a fixed causally-irrelevant corner). Only
+                        meaningful when mask_teleport=True.
+        mask_fill:      "zero" (default) or "local_mean" (blend into
+                        surrounding room hue instead of a hard edge). Only
+                        meaningful when mask_teleport=True.
 
     Returns:
         Absolute path of the JSON results file written to the volume.
@@ -716,6 +740,10 @@ def causal_test(
         cmd.append("--no-wandb")
     if mask_teleport:
         cmd.append("--mask-teleport")
+        if mask_location != "teleport":
+            cmd += ["--mask-location", mask_location]
+        if mask_fill != "zero":
+            cmd += ["--mask-fill", mask_fill]
     if dataset_name != "glitched_hue_tworoom_half":
         cmd += ["--dataset-name", dataset_name]
     if n_aap_episodes != 200:
@@ -729,7 +757,9 @@ def causal_test(
     volume.commit()
 
     ds_suffix = f"_{dataset_name}" if dataset_name != "glitched_hue_tworoom_half" else ""
-    suffix = ("_masked" if mask_teleport else "") + ds_suffix
+    loc_suffix = "" if mask_location == "teleport" else "_irrelevant"
+    fill_suffix = "" if mask_fill == "zero" else f"_{mask_fill}"
+    suffix = ("_masked" if mask_teleport else "") + loc_suffix + fill_suffix + ds_suffix
     results_file = f"{CACHE_DIR}/{os.path.dirname(policy)}/causal_test{suffix}_results.json"
     print(f"\n✅ Causal test complete. Results: {results_file}")
     return results_file
@@ -936,6 +966,8 @@ def main(
     no_wandb: bool = False,
     dataset_name: str = "glitched_hue_tworoom_half",
     mask_causal_test: bool = False,
+    mask_location: str = "teleport",
+    mask_fill: str = "zero",
     extended_validation: bool = False,
     mask_teleport_prob: float = 0.0,
     sigreg_weight: float = 0.09,
@@ -1004,6 +1036,10 @@ def main(
     modal run modaldotcom/app.py --do-collect-theme-d
     modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50 --mask-theme-d
     modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
+
+    # Theme E — masking-artifact control (no retraining, no new data)
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --mask-causal-test --mask-location irrelevant
+    modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --mask-causal-test --mask-location irrelevant --mask-fill local_mean
     """
     if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect,
                 do_collect_optionc, do_remerge_optionc, do_audit, do_statistical_study,
@@ -1075,6 +1111,8 @@ def main(
             policy=policy,
             no_wandb=no_wandb,
             mask_teleport=mask_causal_test,
+            mask_location=mask_location,
+            mask_fill=mask_fill,
             dataset_name=dataset_name,
             extended_validation=extended_validation,
         )

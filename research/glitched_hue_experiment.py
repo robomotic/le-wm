@@ -50,6 +50,13 @@ _HISTORY_SIZE = 3       # must match training config (context cap for sliding wi
 _FRAMESKIP = 5
 _DATASET_NAME = "glitched_hue_tworoom_half"
 
+# Theme E (masking-artifact control, reviewer 2ziA): fixed patch-aligned corner
+# well inside BORDER_SIZE, used as a causally-irrelevant mask location (empty
+# floor/wall, away from the teleport pixel, agent start, and doors) when
+# --mask-location=irrelevant is passed. Patch size is matched to the real
+# detected teleport bbox at runtime, not hardcoded here.
+_IRRELEVANT_CORNER = (14, 14)  # (row0, col0)
+
 
 # ---------------------------------------------------------------------------
 # Entry point
@@ -75,6 +82,31 @@ def main():
             "Zero out the teleport-pixel patch(es) before every encode call. "
             "Removes the direct causal cue so the model must rely on latent "
             "inference alone — Option A Ladder 3 test (reports/testladder.md)."
+        ),
+    )
+    parser.add_argument(
+        "--mask-location", choices=["teleport", "irrelevant"], default="teleport",
+        help=(
+            "Theme E masking-artifact control (reviewer 2ziA). 'teleport' (default) "
+            "masks the real teleport-pixel bbox, as Options A/B/C+A do. 'irrelevant' "
+            "instead masks a same-sized patch at a fixed, causally-irrelevant corner "
+            "(empty floor/wall) — if the surprise ratio moves meaningfully even here, "
+            "part of the masked-condition effect is a statistical artifact of masking "
+            "itself, not the causal information removed. Only meaningful with "
+            "--mask-teleport."
+        ),
+    )
+    parser.add_argument(
+        "--mask-fill", choices=["zero", "local_mean"], default="zero",
+        help=(
+            "Fill value for the masked patch. 'zero' (default) sets the already-"
+            "ImageNet-normalised tensor to 0 — NOT literal black, this is the fixed "
+            "global ImageNet-mean colour, identical for every frame. 'local_mean' "
+            "instead fills with the mean of the immediately-surrounding ring, "
+            "computed per-frame, so the patch blends into whatever room hue is "
+            "actually present — tests whether a hard, context-independent edge (vs. "
+            "a context-blended one) is itself part of any masking artifact. Only "
+            "meaningful with --mask-teleport."
         ),
     )
     parser.add_argument(
@@ -104,12 +136,17 @@ def main():
 
     dataset_name = args.dataset_name
     ds_suffix = f"_{dataset_name}" if dataset_name != _DATASET_NAME else ""
+    loc_suffix = "" if args.mask_location == "teleport" else "_irrelevant"
+    fill_suffix = "" if args.mask_fill == "zero" else f"_{args.mask_fill}"
     suffix  = "_masked" if args.mask_teleport else ""
-    suffix  = suffix + ds_suffix
+    suffix  = suffix + loc_suffix + fill_suffix + ds_suffix
     out_dir = Path(args.ckpt_path).parent
     print(f"Device   : {_DEVICE}")
     print(f"Output   : {out_dir}")
     print(f"Mask TP  : {args.mask_teleport}")
+    if args.mask_teleport:
+        print(f"Mask loc : {args.mask_location}")
+        print(f"Mask fill: {args.mask_fill}")
     print(f"Dataset  : {dataset_name}")
 
     # -------------------------------------------------------------------
@@ -120,12 +157,23 @@ def main():
         import stable_worldmodel as swm
         dataset_path = str(swm.data.utils.get_cache_dir() / f"{dataset_name}.h5")
         print(f"\n[0/5] Detecting teleport patch bbox from {dataset_path} ...")
-        tp_bbox = _detect_teleport_bbox(dataset_path)
-        r0, r1, c0, c1 = tp_bbox
+        real_bbox = _detect_teleport_bbox(dataset_path)
+        r0, r1, c0, c1 = real_bbox
         print(
             f"      pixel bbox  rows [{r0}:{r1}], cols [{c0}:{c1}]  "
             f"→ patches row [{r0//14}:{r1//14}], col [{c0//14}:{c1//14}]"
         )
+        if args.mask_location == "teleport":
+            tp_bbox = real_bbox
+        else:
+            h, w = r1 - r0, c1 - c0
+            ir0, ic0 = _IRRELEVANT_CORNER
+            tp_bbox = (ir0, ir0 + h, ic0, ic0 + w)
+            print(
+                f"      Theme E control: masking IRRELEVANT patch instead — "
+                f"rows [{tp_bbox[0]}:{tp_bbox[1]}], cols [{tp_bbox[2]}:{tp_bbox[3]}] "
+                f"(same {h}x{w} size, fixed corner, causally irrelevant location)"
+            )
 
     # -------------------------------------------------------------------
     # Stage 1 — Load model
@@ -141,7 +189,7 @@ def main():
     loader = _make_loader(dataset_name=dataset_name, seed=args.seed)
     probe_data = _extract_probe_data(
         jepa, loader, args.n_probe_batches,
-        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox, mask_fill=args.mask_fill,
         extra_factors=args.extended_validation,
     )
     if args.extended_validation:
@@ -171,7 +219,7 @@ def main():
     print(f"\n[3/5] AAP cycle ({args.n_aap_episodes} teleport episodes) ...")
     aap_results = _run_aap_cycle(
         jepa, loader, hue_dir, delta_hue, args.n_aap_episodes,
-        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox, mask_fill=args.mask_fill,
     )
     if not aap_results:
         print("      WARNING: no teleport episodes found — check dataset or threshold")
@@ -199,7 +247,7 @@ def main():
     print("\n[4a/5] Structural invariance ...")
     inv_error, inv_error_std = _structural_invariance(
         jepa, loader, delta_hue, pos_dirs,
-        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox, mask_fill=args.mask_fill,
     )
     print(f"       Invariance error: {inv_error:.6f} ± {inv_error_std:.6f}")
 
@@ -207,7 +255,7 @@ def main():
         print("       Extra-factor invariance (Theme C item B) ...")
         factor_inv = _multi_factor_invariance(
             jepa, loader, delta_hue, factor_dirs,
-            mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+            mask_teleport=args.mask_teleport, tp_bbox=tp_bbox, mask_fill=args.mask_fill,
         )
         for name, (mean, std) in factor_inv.items():
             print(f"        {name:<20s} InvErr = {mean:.6f} ± {std:.6f}")
@@ -218,7 +266,7 @@ def main():
     print("\n[4b/5] AAP consistency advantage ...")
     aap_adv, surp_with, surp_without = _aap_consistency_advantage(
         jepa, loader,
-        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox,
+        mask_teleport=args.mask_teleport, tp_bbox=tp_bbox, mask_fill=args.mask_fill,
     )
     print(f"       Surprise with evidence:    {surp_with:.6f}")
     print(f"       Surprise without evidence: {surp_without:.6f}")
@@ -228,6 +276,9 @@ def main():
     # Stage 5 — Report, save, visualise
     # -------------------------------------------------------------------
     metrics = {
+        "mask_teleport":                      args.mask_teleport,
+        "mask_location":                      args.mask_location,
+        "mask_fill":                          args.mask_fill,
         "position_probe_r2":                  pos_r2,
         "hue_probe_accuracy":                 hue_acc,
         "surprise_factual":                   surp_fact,
@@ -304,16 +355,41 @@ def _load_model(ckpt_path):
 from utils import detect_teleport_bbox as _detect_teleport_bbox
 
 
-def _mask_tp(pixels: torch.Tensor, tp_bbox: tuple) -> torch.Tensor:
-    """Return a copy of `pixels` with the teleport patch region zeroed out.
+def _mask_tp(pixels: torch.Tensor, tp_bbox: tuple, fill: str = "zero") -> torch.Tensor:
+    """Return a copy of `pixels` with the given patch region masked out.
 
     Args:
         pixels: (..., C, H, W) float tensor (already ImageNet-normalised).
         tp_bbox: (row_min, row_max, col_min, col_max) in pixel space.
+        fill: "zero" (default, existing behaviour) sets the normalised tensor to
+            0.0 -- NOTE this is NOT literal black; since pixels are already
+            ImageNet-normalised ((x/255 - mean) / std), a normalised value of 0
+            corresponds to the fixed global ImageNet mean colour in raw-pixel
+            space, identical for every frame regardless of room hue. "local_mean"
+            instead fills with the mean of a one-patch ring immediately
+            surrounding the masked region, computed per-sample -- this blends
+            into whatever room hue is actually present in that frame, testing
+            whether a hard, context-independent edge (vs. a context-blended one)
+            is itself driving part of any masking-artifact effect (Theme E,
+            reviewer 2ziA's "stronger controls for masking artifacts").
     """
     r0, r1, c0, c1 = tp_bbox
     p = pixels.clone()
-    p[..., r0:r1, c0:c1] = 0.0
+    if fill == "zero":
+        p[..., r0:r1, c0:c1] = 0.0
+    elif fill == "local_mean":
+        margin = 14  # one ViT patch of surrounding context
+        H, W = p.shape[-2], p.shape[-1]
+        r0m, r1m = max(0, r0 - margin), min(H, r1 + margin)
+        c0m, c1m = max(0, c0 - margin), min(W, c1 + margin)
+        ring_mask = torch.ones(r1m - r0m, c1m - c0m, dtype=torch.bool, device=p.device)
+        ring_mask[(r0 - r0m):(r1 - r0m), (c0 - c0m):(c1 - c0m)] = False
+        ring = p[..., r0m:r1m, c0m:c1m]
+        ring_flat = ring.reshape(*ring.shape[:-2], -1)
+        local_mean = ring_flat[..., ring_mask.reshape(-1)].mean(dim=-1, keepdim=True)
+        p[..., r0:r1, c0:c1] = local_mean.unsqueeze(-1)
+    else:
+        raise ValueError(f"Unknown fill mode: {fill!r} (expected 'zero' or 'local_mean')")
     return p
 
 
@@ -360,7 +436,7 @@ def _make_loader(batch_size=64, shuffle=True, dataset_name=_DATASET_NAME, seed=4
 
 @torch.no_grad()
 def _extract_probe_data(jepa, loader, n_batches, mask_teleport=False, tp_bbox=None,
-                         extra_factors=False):
+                         extra_factors=False, mask_fill="zero"):
     """Return (z, hue_scores, positions, max_deltas[, extras]) arrays for probe training.
 
     hue_scores: G_norm - B_norm per window (positive = green, negative = blue)
@@ -379,7 +455,7 @@ def _extract_probe_data(jepa, loader, n_batches, mask_teleport=False, tp_bbox=No
         pixels = batch["pixels"].to(_DEVICE)  # (B, T, C, H, W)
         action = batch["action"].to(_DEVICE)
         if mask_teleport:
-            pixels = _mask_tp(pixels, tp_bbox)
+            pixels = _mask_tp(pixels, tp_bbox, fill=mask_fill)
 
         out = jepa.encode({"pixels": pixels, "action": action})
         zs.append(out["emb"][:, 0].cpu().float().numpy())  # first-frame latent (B, D)
@@ -515,7 +591,7 @@ def _train_factor_probes(z, extras):
 
 @torch.no_grad()
 def _run_aap_cycle(jepa, loader, hue_dir, delta_hue, n_episodes,
-                   mask_teleport=False, tp_bbox=None):
+                   mask_teleport=False, tp_bbox=None, mask_fill="zero"):
     """Encode factual (blue+teleport) windows; intervene on hue; measure per-step surprise.
 
     For each teleport window found, computes surprise at every prediction step
@@ -543,7 +619,7 @@ def _run_aap_cycle(jepa, loader, hue_dir, delta_hue, n_episodes,
         pixels  = batch["pixels"].to(_DEVICE)
         action  = batch["action"].to(_DEVICE)
         if mask_teleport:
-            pixels = _mask_tp(pixels, tp_bbox)
+            pixels = _mask_tp(pixels, tp_bbox, fill=mask_fill)
         out     = jepa.encode({"pixels": pixels, "action": action})
         emb     = out["emb"]      # (B, T, D)
         act_emb = out["act_emb"]
@@ -602,7 +678,7 @@ def _run_aap_cycle(jepa, loader, hue_dir, delta_hue, n_episodes,
 
 @torch.no_grad()
 def _multi_factor_invariance(jepa, loader, delta_hue, factor_dirs, n_batches=30,
-                              mask_teleport=False, tp_bbox=None):
+                              mask_teleport=False, tp_bbox=None, mask_fill="zero"):
     """Mean absolute change in each factor's probe subspace after the hue intervention.
 
     Invariance Error (per factor) = mean |z @ w.T - z_cf @ w.T|
@@ -619,7 +695,7 @@ def _multi_factor_invariance(jepa, loader, delta_hue, factor_dirs, n_batches=30,
         pixels = batch["pixels"].to(_DEVICE)
         action = batch["action"].to(_DEVICE)
         if mask_teleport:
-            pixels = _mask_tp(pixels, tp_bbox)
+            pixels = _mask_tp(pixels, tp_bbox, fill=mask_fill)
         out    = jepa.encode({"pixels": pixels, "action": action})
         B, T, D = out["emb"].shape
         z    = out["emb"].reshape(B * T, D)   # (BT, D)
@@ -637,11 +713,11 @@ def _multi_factor_invariance(jepa, loader, delta_hue, factor_dirs, n_batches=30,
 
 
 def _structural_invariance(jepa, loader, delta_hue, pos_dirs, n_batches=30,
-                            mask_teleport=False, tp_bbox=None):
+                            mask_teleport=False, tp_bbox=None, mask_fill="zero"):
     """Position-only structural invariance (thin wrapper over _multi_factor_invariance)."""
     result = _multi_factor_invariance(
         jepa, loader, delta_hue, {"position": pos_dirs}, n_batches=n_batches,
-        mask_teleport=mask_teleport, tp_bbox=tp_bbox,
+        mask_teleport=mask_teleport, tp_bbox=tp_bbox, mask_fill=mask_fill,
     )
     return result["position"]
 
@@ -652,7 +728,7 @@ def _structural_invariance(jepa, loader, delta_hue, pos_dirs, n_batches=30,
 
 @torch.no_grad()
 def _aap_consistency_advantage(jepa, loader, n_warmup=20, n_eval=50,
-                                mask_teleport=False, tp_bbox=None):
+                                mask_teleport=False, tp_bbox=None, mask_fill="zero"):
     """Measure how much factual evidence improves over a blind (mean) context.
 
     Advantage = mean_surprise(blind) - mean_surprise(factual)
@@ -668,7 +744,7 @@ def _aap_consistency_advantage(jepa, loader, n_warmup=20, n_eval=50,
         pixels = batch["pixels"].to(_DEVICE)
         action = batch["action"].to(_DEVICE)
         if mask_teleport:
-            pixels = _mask_tp(pixels, tp_bbox)
+            pixels = _mask_tp(pixels, tp_bbox, fill=mask_fill)
         out    = jepa.encode({"pixels": pixels, "action": action})
         emb_buf.append(out["emb"].cpu())
     # Cap to last _HISTORY_SIZE frames so positional embeddings stay in-distribution
@@ -683,7 +759,7 @@ def _aap_consistency_advantage(jepa, loader, n_warmup=20, n_eval=50,
         pixels  = batch["pixels"].to(_DEVICE)
         action  = batch["action"].to(_DEVICE)
         if mask_teleport:
-            pixels = _mask_tp(pixels, tp_bbox)
+            pixels = _mask_tp(pixels, tp_bbox, fill=mask_fill)
         out     = jepa.encode({"pixels": pixels, "action": action})
         emb     = out["emb"]      # (B, T, D)
         act_emb = out["act_emb"]
@@ -1020,12 +1096,18 @@ def _log_to_wandb(metrics, ckpt_path, out_dir, suffix=""):
     import wandb
 
     run_tag = Path(ckpt_path).parent.name
+    extra_tags = []
+    if metrics.get("mask_teleport"):
+        extra_tags.append("masked_teleport")
+        if metrics.get("mask_location") == "irrelevant":
+            extra_tags.append("theme_e_irrelevant_patch")
+        if metrics.get("mask_fill") == "local_mean":
+            extra_tags.append("theme_e_local_mean_fill")
     run = wandb.init(
         project="lewm-causality",
         entity="paoloai-robomotic",
         name=f"causal_test_{run_tag}{suffix}",
-        tags=["causal_test", "aap", "disentanglement"]
-              + (["masked_teleport"] if suffix else []),
+        tags=["causal_test", "aap", "disentanglement"] + extra_tags,
         config={"checkpoint": str(ckpt_path), "mask_teleport": bool(suffix)},
     )
     payload = {f"causal/{k}": v for k, v in metrics.items()}

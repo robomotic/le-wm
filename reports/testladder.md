@@ -657,3 +657,87 @@ modal run modaldotcom/app.py --do-theme-d-validate --policy lewm_epoch_50
 Results: `theme_d_paired_results.json` / `theme_d_paired_results_masked.json` and
 `theme_d_approx_error[_masked].pdf` / `theme_d_ratio_comparison[_masked].pdf` (`.png`) on the
 `swm-cache` volume alongside the checkpoint.
+
+## Theme E — Masking-artifact control (2026-07-25, reviewer 2ziA)
+
+2ziA's concern: *"Add stronger controls for masking artifacts."* Zeroing the teleport-pixel patch
+(Option A/B/C+A's masking protocol) might itself look statistically anomalous to the encoder — an
+unusual, uniform patch — independent of the causal information it removes. If so, part of the
+surprise-ratio increase attributed to "removing the causal shortcut" could actually be "the model
+reacting to a weird-looking input," muddying the interpretation of every masked-condition result
+in the paper.
+
+### Methodology
+
+`research/glitched_hue_experiment.py` now supports `--mask-location {teleport,irrelevant}` and
+`--mask-fill {zero,local_mean}`. `irrelevant` masks a same-sized patch at a fixed, causally-neutral
+corner (`_IRRELEVANT_CORNER`, rows/cols [14:14+h, 14:14+w] matching the real bbox's detected size)
+instead of the real teleport-pixel bbox. `local_mean` fills the masked region with the mean of the
+immediately-surrounding ring (computed per-frame, blending into whatever room hue is present)
+instead of the existing default `zero` fill — which is worth a documentation correction in its own
+right: since `_mask_tp` operates on the already-ImageNet-normalised tensor, "zero" is **not**
+literal black — it's the fixed global ImageNet-mean colour, identical for every frame regardless of
+room hue. `local_mean` is the meaningfully different, context-blended alternative.
+
+All five conditions below were run fresh, in the same session, against the same checkpoint
+(`lewm_epoch_50`), same `--seed 42` DataLoader shuffle, same `N=200` AAP episodes, under the
+current per-episode surprise-ratio metric — a fully self-consistent 2×2 (location × fill) plus an
+unmasked reference point.
+
+### Results
+
+| Condition | Surprise ratio (mean ± std, N=200) | Struct. inv. error | Pos R² |
+|---|---|---|---|
+| Unmasked baseline | 3.79 ± 5.56 | 0.394 | 0.987 |
+| **teleport** × zero (Option A protocol) | **1.61 ± 2.67** | 0.286 | 0.987 |
+| teleport × local_mean | 2.12 ± 3.81 | 0.389 | 0.987 |
+| **irrelevant** × zero (Theme E primary control) | **1.96 ± 2.70** | 0.074 | 0.984 |
+| irrelevant × local_mean | 1.27 ± 1.05 | 0.179 | 0.971 |
+
+### Verdict — outcome 2: the masking artifact is real, and not smaller than the causal effect
+
+**Primary Theme E question (irrelevant-patch control):** masking a causally-irrelevant patch
+(ratio 1.96 ± 2.70) produces a surprise ratio *at least as large as* masking the real teleport
+patch (1.61 ± 2.67) — if anything slightly larger. This is squarely outcome 2 from the original
+framing, not outcome 1: the irrelevant-patch effect is not negligible relative to the real-patch
+effect, so part of the surprise-ratio behaviour attributed to "removing the causal shortcut"
+throughout Options A/B/C+A cannot be cleanly separated from a generic masking-artifact effect. The
+paper needs to say this explicitly wherever masked-condition results are presented as isolating
+causal information removal.
+
+**Secondary question (fill value):** fill value matters, but not consistently in one direction —
+`local_mean` *increases* the ratio at the teleport location (1.61→2.12) but *decreases* it at the
+irrelevant location (1.96→1.27). A fill value that simply "looks less anomalous" doesn't uniformly
+shrink the effect, which argues against a single simple story (e.g. "hard edges alone drive it")
+and for treating the masking protocol's exact implementation as a real methodological variable, not
+an incidental detail.
+
+**Unplanned but important observation, flagged not overclaimed:** in this fully-controlled,
+same-session comparison, the **unmasked baseline (3.79 ± 5.56) has a higher ratio than either
+masked condition** — the opposite direction from the historical Option A narrative
+(0.718 → 0.867, an *increase* under masking). This is not a Theme E finding proper and should not
+be read as "the masking-increases-surprise story is wrong" on the strength of one seed: per-episode
+std here is comparable to or larger than the mean in every row (a symptom already flagged elsewhere
+in this report), and the historical 0.718/0.867 numbers predate the DataLoader-shuffle
+reproducibility fix (`b9b7551`), so they were computed over a different, unseeded episode sample —
+not a like-for-like comparison to begin with. Recorded here so it isn't lost, but it needs a
+dedicated multi-seed re-verification of the basic masked-vs-unmasked comparison before anyone treats
+the direction as established either way; that re-verification is out of scope for Theme E itself.
+
+### Reproduce
+
+```
+modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50
+modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --mask-causal-test
+modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --mask-causal-test --mask-fill local_mean
+modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --mask-causal-test --mask-location irrelevant
+modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 --mask-causal-test --mask-location irrelevant --mask-fill local_mean
+```
+
+Results: `causal_test_results.json`, `causal_test_masked_results.json`,
+`causal_test_masked_local_mean_results.json`, `causal_test_masked_irrelevant_results.json`,
+`causal_test_masked_irrelevant_local_mean_results.json` on the `swm-cache` volume alongside the
+checkpoint. Note: rerunning the plain unmasked/masked commands above overwrites the
+`--extended-validation` (Theme C) artifacts previously cached at the same unsuffixed paths;
+Theme C's findings are fully preserved in this report's own text and are regenerable at any time
+via `--extended-validation`.
