@@ -82,6 +82,22 @@ Theme E — masking-artifact control (reviewer 2ziA):
     modal run modaldotcom/app.py --do-causal-test --policy lewm_epoch_50 \\
         --mask-causal-test --mask-location irrelevant --mask-fill local_mean
 
+Theme G — decorrelated-confound positive control (biggest remaining lift):
+    Collect a dataset where hue and teleport.enabled are drawn INDEPENDENTLY
+    (per chunk of episodes, GlitchedHueExpertPolicy -- same recipe as
+    glitched_hue_tworoom_half, so confound removal is the only thing that
+    differs from baseline), train a fresh checkpoint on it, then run the same
+    causal_test battery. Expected result if the pipeline is sound: surprise
+    ratio well below 1.0 in both masked and unmasked conditions, since there's
+    no confound left to latch onto. Start with one seed before committing to
+    a 3-seed extension -- this is the single most expensive item in this
+    cycle (full 20k-episode collection + ~100-epoch training).
+
+    modal run modaldotcom/app.py --do-collect-decorrelated
+    modal run modaldotcom/app.py::train --data glitched_hue_decorrelated --max-epochs 100 --seed 3072 --no-wandb-enabled
+    modal run modaldotcom/app.py --do-causal-test --policy <new_ckpt> --dataset-name glitched_hue_decorrelated
+    modal run modaldotcom/app.py --do-causal-test --policy <new_ckpt> --dataset-name glitched_hue_decorrelated --mask-causal-test
+
 Other commands
 --------------
     modal run modaldotcom/app.py --do-train --max-epochs 1 --no-wandb   # smoke test
@@ -457,6 +473,55 @@ def remerge_optionc() -> str:
     volume.commit()
     print(f"\n✅ Merged dataset on volume: {out}  ({fsize:,} bytes)")
     return str(out)
+
+
+# ---------------------------------------------------------------------------
+# Theme G — decorrelated-confound positive control (no GPU for collection)
+# ---------------------------------------------------------------------------
+
+@app.function(
+    image=image,
+    volumes={CACHE_DIR: volume},
+    env=ENV,
+    timeout=21600,  # 6 h ceiling -- 20k episodes via GlitchedHueExpertPolicy,
+                    # ~1000 independent-flip chunks at the default chunk-size
+)
+def collect_decorrelated(n_episodes: int = 20000, seed: int = 3072,
+                          chunk_size: int = 20, dataset_name: str = "glitched_hue_decorrelated") -> str:
+    """Collect the Theme G decorrelated-confound dataset on a cloud CPU worker.
+
+    Runs research/collect_decorrelated.py: same GlitchedHueExpertPolicy recipe
+    that built glitched_hue_tworoom_half (action_noise=0.5, action_repeat_prob=
+    0.05), but hue and teleport.enabled are drawn INDEPENDENTLY per chunk of
+    `chunk_size` episodes instead of the training confound's deterministic
+    pairing -- a positive control with no confound to latch onto.
+
+    Args:
+        n_episodes:   Total episodes to collect (default: 20000, matching
+                      glitched_hue_tworoom_half's scale).
+        seed:         Base seed for both the chunk-assignment RNG and the
+                      per-chunk env/policy seeding.
+        chunk_size:   Episodes per independent (hue, teleport_enabled) coin
+                      flip (default: 20).
+        dataset_name: Output dataset name (default: glitched_hue_decorrelated).
+
+    Returns:
+        Absolute path of the merged HDF5 file on the volume.
+    """
+    import subprocess
+    cmd = [
+        "python", "research/collect_decorrelated.py",
+        f"--n-episodes={n_episodes}",
+        f"--seed={seed}",
+        f"--chunk-size={chunk_size}",
+        f"--dataset-name={dataset_name}",
+    ]
+    print(f"Running: {' '.join(cmd)}")
+    subprocess.run(cmd, check=True, cwd="/workspace")
+    volume.commit()
+    out = f"{CACHE_DIR}/{dataset_name}.h5"
+    print(f"\n✅ Decorrelated dataset written to volume: {out}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +1023,11 @@ def main(
     do_collect_theme_d: bool = False,
     do_theme_d_validate: bool = False,
     mask_theme_d: bool = False,
+    do_collect_decorrelated: bool = False,
+    decorrelated_episodes: int = 20000,
+    decorrelated_seed: int = 3072,
+    decorrelated_chunk_size: int = 20,
+    decorrelated_dataset_name: str = "glitched_hue_decorrelated",
     data: str = "glitched_hue_tworoom",
     max_epochs: int = 100,
     policy: str = "",
@@ -1043,11 +1113,11 @@ def main(
     """
     if not any([do_train, do_eval, do_stats, do_causal_test, do_inspect,
                 do_collect_optionc, do_remerge_optionc, do_audit, do_statistical_study,
-                do_collect_theme_d, do_theme_d_validate]):
+                do_collect_theme_d, do_theme_d_validate, do_collect_decorrelated]):
         print(
             "Nothing to do. Pass --do-train, --do-eval, --do-stats, --do-causal-test, "
             "--do-inspect, --do-collect-optionc, --do-statistical-study, "
-            "--do-collect-theme-d, or --do-theme-d-validate."
+            "--do-collect-theme-d, --do-theme-d-validate, or --do-collect-decorrelated."
         )
         return
 
@@ -1088,6 +1158,15 @@ def main(
             episode_len=theme_d_episode_len,
         )
         print(f"Theme D paired dataset on volume: {out}")
+
+    if do_collect_decorrelated:
+        out = collect_decorrelated.remote(
+            n_episodes=decorrelated_episodes,
+            seed=decorrelated_seed,
+            chunk_size=decorrelated_chunk_size,
+            dataset_name=decorrelated_dataset_name,
+        )
+        print(f"Decorrelated dataset on volume: {out}")
 
     if do_theme_d_validate:
         if not policy:
