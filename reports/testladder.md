@@ -741,3 +741,115 @@ checkpoint. Note: rerunning the plain unmasked/masked commands above overwrites 
 `--extended-validation` (Theme C) artifacts previously cached at the same unsuffixed paths;
 Theme C's findings are fully preserved in this report's own text and are regenerable at any time
 via `--extended-validation`.
+
+## Observational Causal Discovery — Grounding the Related Work Citations (2026-07-25, reviewer J8ik)
+
+J8ik's complaint: *"Existing causal evaluation methods are discussed but never applied to the same
+model or environment."* `ke2021causalmbrl` and `ahmed2020causalworld` are cited three times
+narratively (Abstract, Intro, Related Work) but never run against anything in this paper.
+
+**Why not integrate the actual codebases:** both are full external benchmark suites (grid-world SCM
+recovery / robotic manipulation with programmatically modifiable SCMs) that don't drop into
+`stable-worldmodel` or operate on a single JEPA checkpoint — that's a multi-week integration
+project, not a targeted fix, and it's not what the paper needs to make its point. Instead: implement
+the *style* of evaluation each paper represents, on data already in hand.
+
+**`ahmed2020causalworld`'s half — generalization under a programmatically modified SCM — is
+already covered, just not framed that way.** Option C (`reports/testladder.md`, "Option C" section
+above) is a dataset-level confound reversal testing whether the model's predictions generalize
+under a modified causal structure — exactly `ahmed2020`'s evaluation paradigm. This is a paper-text
+edit (make the connection explicit in Related Work), not a new experiment; nothing new was run for
+this half.
+
+**`ke2021causalmbrl`'s half — recovering a causal graph from purely observational data — was the
+genuinely uncovered gap, and is cheap to close properly.** `research/causal_discovery.py` runs the
+PC algorithm (via `causal-learn`, CPU-only, no GPU or Modal job) on tabular observational variables
+extracted directly from the existing training dataset (`glitched_hue_tworoom_half`) — no model
+checkpoint involved at all, since this tests what a purely observational method can recover from
+the data itself, independent of what the trained JEPA does with it.
+
+### Methodology
+
+One row per episode (episode-level aggregates, not model-ready context windows), extracted directly
+from the raw HDF5:
+
+- `hue` — binary, green-minus-blue channel mean of the first frame (same sign convention as
+  `_extract_probe_data`'s `hue_score` in `research/glitched_hue_experiment.py`).
+- `teleported` — binary, whether the teleport event fired at any point in the episode.
+- `start_room` — binary, which side of the central wall the agent starts on.
+- `ep_len_bin`, `dist_final_bin` — 3-level (tercile) categorical bins of episode length and final
+  distance-to-target.
+
+`hue` and teleport-*gating* are deterministically linked in this dataset (blue → enabled, green →
+disabled), but `teleported` (whether the event actually *fires* in a given episode) also depends on
+the policy's trajectory reaching the pixel — so the hue/teleported association is strong but
+imperfect, exactly the kind of confound a purely observational method has to untangle without ever
+seeing the reversed-confound condition Option C provides. PC was run with `alpha=0.05`,
+`indep_test=chisq` (fully discrete/categorical treatment — deliberately avoiding the Gaussian
+assumption a `fisherz` test would impose on fundamentally binary/bounded variables), on N≈5000
+episodes sampled from the dataset, and checked for robustness across 3 different random samples
+(seeds 42/123/7).
+
+### Results
+
+```
+P(teleported=1 | hue=blue)  = 0.2866
+P(teleported=1 | hue=green) = 0.0000
+```
+
+Discovered graph (edges, all 3 seeds agree on the key edge):
+
+```
+teleported --> hue
+hue --> ep_len_bin
+dist_final_bin --> hue
+teleported --- start_room        (undirected)
+teleported --> ep_len_bin
+start_room --> ep_len_bin
+start_room --- dist_final_bin    (undirected)
+dist_final_bin --> ep_len_bin
+```
+
+### Verdict — worse than "can't orient": PC confidently gets the direction backwards
+
+The anticipated outcomes were (1) PC can't orient the hue↔teleported edge, or (2) PC actively
+misattributes causation. **The result is outcome 2, and it is fully robust across 3 random
+samples**: PC doesn't just fail to determine direction — it **confidently orients the edge as
+`teleported → hue`**, i.e. concludes that whether the agent got teleported *causes* the room's
+colour. This is backwards: the true generative process sets room hue first (via
+`variation.teleport.enabled`, itself set before the episode starts), and *that* determines whether
+the teleport event can fire during rollout — not the reverse. A purely observational method applied
+to this dataset produces a confident, wrong causal claim, not merely an uninformative one.
+
+This is the direct empirical counterpart to the interventional diagnostics this paper actually
+relies on: the AAP surprise ratio and Theme D's ground-truth paired counterfactual both resolve the
+hue/teleport relationship *by intervention* (forcing the hue value and observing what the model
+predicts, or literally rolling out both conditions from the same start state) — which is precisely
+what a purely observational method, no matter how standard or well-established, structurally cannot
+do. Reporting these side by side is the point: `ke2021causalmbrl`'s paradigm is now actually run
+against this paper's own data, and it fails in exactly the way the paper's broader argument predicts
+observational methods should fail on a hidden-confound environment like this one.
+
+### Caveats
+
+- **This tests the *data*, not the *model*.** No JEPA checkpoint is involved — this is a property of
+  what's recoverable from the raw dataset's observational variables, independent of what the trained
+  encoder does with pixels. It is complementary to, not a replacement for, the model-facing
+  diagnostics (AAP ratio, Theme D) elsewhere in this report.
+- **Discretization choice is one reasonable option among several.** Tercile-binning `ep_len`/
+  `dist_final` and using `chisq` was chosen to avoid imposing a Gaussian assumption on bounded/binary
+  variables, but sensitivity to bin count or a continuous (`fisherz`) treatment was not explored.
+- **Algorithm choice**: PC's specific orientation rules (Meek's rules applied to the detected
+  v-structures) are one standard causal-discovery approach; a different algorithm (GES, LiNGAM,
+  etc.) might behave differently on this data. That robustness dimension is out of scope here — the
+  point is that *a* standard, well-established method, run properly, produces this result; it is not
+  a claim that *no* observational method could ever succeed.
+
+### Reproduce
+
+```
+python research/causal_discovery.py --n-episodes 5000 --seed 42
+```
+
+No Modal job, no GPU. Requires `causal-learn` (added to `pyproject.toml`). Results:
+`causal_discovery_results.json` in the working directory.

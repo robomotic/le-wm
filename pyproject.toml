@@ -13,6 +13,10 @@ dependencies = [
     # Override: stable-pretraining's loose constraint resolves to 1.1.1 which
     # lacks the `datasets.config` submodule; 2.0+ is required.
     "datasets>=2.0",
+    # PC algorithm for research/causal_discovery.py (Theme H-ish: observational
+    # causal-discovery baseline, contrasted against the interventional AAP/
+    # Theme D diagnostics). CPU-only, no Modal image change needed.
+    "causal-learn>=0.1.4",
 ]
 
 [tool.uv.sources]
