@@ -373,9 +373,14 @@ Qualitative conclusions from the single-seed study hold and are strengthened:
   higher, not a convergence artifact resolving with more training. Pos R² is essentially
   unchanged (0.151 → 0.145). This directly answers the open question: the ablation's failure is
   structural, not a training-budget shortfall, and the Option B vs. ablation comparison in this
-  table is now genuinely apples-to-apples. Per-seed epoch-90 numbers: seed 3072 SIE=858.5/R²=0.078,
-  seed 1234 SIE=570.8/R²=0.080, seed 5678 SIE=88.2/R²=0.277 — high seed-to-seed variance, but
-  every seed lands one to three orders of magnitude above Option B's SIE regardless.
+  table is now genuinely apples-to-apples. Per-seed epoch-90 numbers (ratio is mean ± std over its
+  own 200 episodes; SIE/R² are point values): seed 3072 ratio=1.688±0.140/SIE=858.5/R²=0.078,
+  seed 1234 ratio=3.442±0.523/SIE=570.8/R²=0.080, seed 5678 ratio=1.004±0.001/SIE=88.2/R²=0.277 —
+  high seed-to-seed variance, but every seed lands one to three orders of magnitude above Option
+  B's SIE regardless. Cross-seed aggregates (mean ± std of the three per-seed means, matching the
+  table's convention): ratio 2.05 ± 1.03, SIE 505.8 ± 317.8, Pos R² 0.145 ± 0.093 (the table's Pos
+  R² column follows the existing bare-mean convention used for every row; the std is given here
+  for full three-column honesty if needed for the writeup).
 
 - **SIGReg ablation epoch note (historical):** all three original ablation seeds ran to epoch 50
   (previously only an epoch-27 crash checkpoint existed). Epoch-50 results (SIE ≈ 353) already
