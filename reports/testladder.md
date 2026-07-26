@@ -307,12 +307,20 @@ individual r_i). The per-episode formulation is statistically correct for public
 |-----------|-------|--------|-----------------|
 | Baseline | 3072, 1234, 5678 | 50 | `lewm_epoch_50`, `ts_1777994910/lewm_epoch_50`, `ts_1777991006/lewm_epoch_50` |
 | Option B | 3072, 1234, 5678 | 90–100 | `ts_1776884938/lewm_epoch_50`, `ts_1778145022_93c1c4/lewm_epoch_91`, `ts_1778145025_368123/lewm_epoch_90` |
-| SIGReg ablation (λ=0) | 3072, 1234, 5678 | 50 | `ts_1777735299/lewm_epoch_50`, `ts_1778145024_04e194/lewm_epoch_50`, `ts_1777735306/lewm_epoch_50` |
+| SIGReg ablation (λ=0) | 3072, 1234, 5678 | 90 | `ts_1784906928_47a0a5/lewm_epoch_90`, `ts_1784906939_d724d4/lewm_epoch_90`, `ts_1784906944_ea6438/lewm_epoch_90` |
 | Option C | 3072, 1234, 5678 | — (no training) | `lewm_epoch_50`, `ts_1777994910/lewm_epoch_50`, `ts_1777991006/lewm_epoch_50` on reversed dataset |
 | Option C+A | 3072, 1234, 5678 | — (no training) | same three checkpoints on reversed dataset, pixel masked |
 
 Option B required 90–100 epochs to converge (50-epoch checkpoints showed SIE ≈ 289,
 under-converged). Epoch-91 and epoch-90 checkpoints were used for seeds 1234 and 5678.
+
+The SIGReg ablation was originally evaluated at epoch 50 while Option B was evaluated at epoch
+90–91 — an apples-to-oranges epoch mismatch the paper's own text already flagged. J8ik's Theme F:
+all three ablation seeds were retrained fresh (not resumed — the original epoch-50 checkpoints'
+cosine LR schedule was configured for a 50-epoch horizon, so resuming with a new max_epochs=90
+target risks scheduler dynamics that don't match a genuine continuous 90-epoch run; a fresh run
+targeting max_epochs=90 from the start, identical to how Option B's own 90/91-epoch checkpoints
+were obtained, avoids that risk entirely) to `max_epochs=90`, matching Option B's epoch count.
 
 ### Results (N=200 AAP episodes, N=30 invariance batches)
 
@@ -322,7 +330,8 @@ under-converged). Epoch-91 and epoch-90 checkpoints were used for seeds 1234 and
 | Option B (mask p=0.5, 90-100 ep) | 3 | 0.995 | **15.17 ± 7.49** | **0.188 ± 0.071** |
 | Option C (reversed dataset) | 3 | 0.988 | **2.02 ± 0.41** | 1.00 ± 0.11 |
 | Option C+A (reversed + masked) | 3 | 0.986 | **1.23 ± 0.07** | 0.95 ± 0.28 |
-| SIGReg ablation (λ=0) | 3 | 0.151 | **2.76 ± 2.09** | **353.4 ± 255.3** |
+| SIGReg ablation (λ=0), epoch 50 (superseded) | 3 | 0.151 | 2.76 ± 2.09 | 353.4 ± 255.3 |
+| SIGReg ablation (λ=0), epoch 90 (matched to Option B) | 3 | 0.145 | **2.05 ± 1.03** | **505.8 ± 317.8** |
 
 ### Interpretation (updated)
 
@@ -344,16 +353,34 @@ Qualitative conclusions from the single-seed study hold and are strengthened:
   strengthens the conclusion: `lewm_epoch_50` is a Ladder 1/2 model, and it now rests on the same
   multi-seed footing as Baseline/Option B/ablation rather than a single point estimate.
 
-- **SIGReg ablation:** lowest mean ratio (2.76), but this reflects prediction collapse, not
-  causal reasoning. SIE ≈ 353 (vs 0.188 for Option B) and Pos R² ≈ 0.15 confirm the latent
-  space is unstructured. High std (±255.3 for SIE, ±2.09 for ratio) is expected across seeds
-  when the regularizer is removed — the latent space settles in a different degenerate
-  configuration for each seed.
+- **SIGReg ablation:** low mean ratio at both epoch counts (2.76 at epoch 50, 2.05 at epoch 90),
+  but this reflects prediction collapse, not causal reasoning — `surprise_factual` and
+  `surprise_counterfactual` are both ~1e-6 in absolute terms at epoch 90 for all three seeds
+  (near-zero predictions regardless of intervention), so the ratio itself carries little
+  information here; SIE and Pos R² are the metrics that actually diagnose the failure mode.
+  SIE ≈ 354–506 (vs 0.188 for Option B) and Pos R² ≈ 0.14–0.15 confirm the latent space is
+  unstructured at both epoch counts. High std across seeds (±255–318 for SIE) is expected when
+  the regularizer is removed — the latent space settles into a different degenerate
+  configuration per seed.
 
-- **SIGReg ablation epoch note:** all three ablation seeds ran to epoch 50 (previously
-  only an epoch-27 crash checkpoint existed). The signal is decisive: epoch-50 results
-  (SIE ≈ 353) confirm the epoch-27 estimate (SIE ≈ 1440) was not a transient — the latent
-  space remains fully entangled throughout training without SIGReg.
+- **SIGReg ablation, matched-epoch retrain (added 2026-07-24, closing the epoch-mismatch gap
+  J8ik flagged in Theme F): SIE does NOT drop at matched epoch count.** The original Table 6
+  compared Option B at epoch 90–91 against the ablation at epoch 50 — an acknowledged
+  apples-to-oranges gap. All three ablation seeds were retrained fresh to epoch 90 (same
+  `max_epochs=90` target Option B's extension used, not a resume from the epoch-50 checkpoint —
+  see the Setup note above on why resuming was avoided). Result: SIE moves from 353.4 ± 255.3
+  (epoch 50) to **505.8 ± 317.8** (epoch 90) — same order of magnitude, if anything slightly
+  higher, not a convergence artifact resolving with more training. Pos R² is essentially
+  unchanged (0.151 → 0.145). This directly answers the open question: the ablation's failure is
+  structural, not a training-budget shortfall, and the Option B vs. ablation comparison in this
+  table is now genuinely apples-to-apples. Per-seed epoch-90 numbers: seed 3072 SIE=858.5/R²=0.078,
+  seed 1234 SIE=570.8/R²=0.080, seed 5678 SIE=88.2/R²=0.277 — high seed-to-seed variance, but
+  every seed lands one to three orders of magnitude above Option B's SIE regardless.
+
+- **SIGReg ablation epoch note (historical):** all three original ablation seeds ran to epoch 50
+  (previously only an epoch-27 crash checkpoint existed). Epoch-50 results (SIE ≈ 353) already
+  confirmed the epoch-27 estimate (SIE ≈ 1440) was not a transient; the epoch-90 retrain above
+  extends that finding to the epoch count actually used for Option B's comparison.
 
 ### LaTeX table (NeurIPS/ICLR format)
 
@@ -370,13 +397,16 @@ Option A               & $—$              & $—$               & $—$     \\
 Option B               & $15.17 \pm 7.49$ & $0.188 \pm 0.071$ & $0.995$ \\
 Option C               & $2.02 \pm 0.41$  & $1.00 \pm 0.11$   & $0.988$ \\
 Option C+A             & $1.23 \pm 0.07$  & $0.95 \pm 0.28$   & $0.986$ \\
-Ablation ($\lambda=0$) & $2.76 \pm 2.09$  & $353.4 \pm 255.3$ & $0.151$ \\
+Ablation, ep.\ 50 ($\lambda=0$) & $2.76 \pm 2.09$  & $353.4 \pm 255.3$ & $0.151$ \\
+Ablation, ep.\ 90 ($\lambda=0$) & $2.05 \pm 1.03$  & $505.8 \pm 317.8$ & $0.145$ \\
 \bottomrule
 \end{tabular}
 \caption{LeWM causal ladder results (mean\,$\pm$\,std over 3 seeds, 200 AAP episodes per run;
 Option C/C+A added 2026-07-24, reusing the already-trained seed-1234/5678 checkpoints and the
-already-collected reversed dataset — no retraining or new data collection). Surprise ratio is the
-per-episode mean of $r_i = \text{surp\_cf}_i / (\text{surp\_fact}_i + \varepsilon)$.}
+already-collected reversed dataset — no retraining or new data collection. Ablation epoch-90 row
+added 2026-07-24, fresh 3-seed retrain matching Option B's epoch count — see epoch-50 row for the
+original, epoch-mismatched comparison). Surprise ratio is the per-episode mean of
+$r_i = \text{surp\_cf}_i / (\text{surp\_fact}_i + \varepsilon)$.}
 \end{table}
 ```
 
