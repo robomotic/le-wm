@@ -1063,3 +1063,114 @@ modal run modaldotcom/app.py --do-theme-d-validate --policy ts_1785091494_1a91d8
 No new data collection — reuses the existing `glitched_hue_theme_d_fact.h5`/`_cf.h5` paired dataset.
 Results: `theme_d_paired_results_masked.json`, `theme_d_paired_results.json` in
 `ts_1785091494_1a91d8/` on the `swm-cache` volume.
+
+## Oracle Calibration — Provable ceiling/floor reference points for the AAP Surprise Ratio (2026-07-27)
+
+Every surprise-ratio number in this report so far comes from a trained JEPA checkpoint, so there is
+no independent way to know what a "perfect" or "maximally shortcut-reliant" model *should* score on
+this exact metric. `research/oracle_calibration.py` answers that with no model at all: two
+hand-coded predictors, built directly on ground-truth simulator features (`dist_to_pad`,
+`teleport_enabled`, and a hue-channel score derived from the raw pixel patch), scored through the
+same per-episode ratio formula (`eq:per-episode-ratio`/`eq:aap-ratio`) used everywhere else in this
+document. No training, no GPU, no new data — this is a pure calibration check on the metric itself,
+run against 200 teleported episodes sampled from the existing `glitched_hue_tworoom_half` dataset (2
+episodes skipped for unreadable HDF5 chunks, a pre-existing local-copy issue unrelated to this
+script).
+
+- **`true_cause_predict`** reads only `dist_to_pad` and `teleport_enabled` — the actual physical
+  cause of the outcome — and outputs `sigmoid(K·(radius − dist_to_pad))`, gated to 0 when
+  teleport is disabled. It never reads hue.
+- **`hue_shortcut_predict`** reads only the pixel-derived `hue_score` and outputs
+  `sigmoid(−K_hue·hue_score)` (negative sign because `hue_score` is negative for blue, the
+  training-confound color that must predict high teleport-probability). It never reads
+  `dist_to_pad` or `teleport_enabled`.
+
+Both predictors are deliberately smooth (sigmoid, not a hard 0/1 threshold) — an earlier hard-coded
+draft of `hue_shortcut_predict` (`1.0 if blue else 0.0`) was caught before running anything, since on
+teleported-only episodes it forces `surp_fact = 0` exactly, producing a ratio dominated entirely by
+the epsilon term rather than anything real. `make_counterfactual` performs a single `do(hue)`
+intervention directly on the ground-truth feature dict — flips only `hue`/`hue_score`, leaves
+`dist_to_pad`/`teleport_enabled` untouched — guaranteeing zero cross-factor leakage, unlike the
+latent-space `z_cf = z + Δ_hue` translation used everywhere else in this report.
+
+### Results
+
+| Oracle | Ratio-of-means | Per-episode mean ± std | N |
+|---|---|---|---|
+| `true_cause` (ceiling) | 1.0000 | 1.0000 ± 0.0000 | 200 |
+| `hue_shortcut` (floor, K_hue calibrated at target_prob=0.95) | 335.26 | 335.27 ± 0.94 | 200 |
+
+**`true_cause`'s ratio ≈ 1.0 is forced by construction, not an empirical finding about robustness.**
+Since `make_counterfactual` never touches `dist_to_pad` or `teleport_enabled` — the only two
+quantities `true_cause_predict` reads — `pred_fact` and `pred_cf` are identical for any predictor
+steepness `K`, so `surp_fact == surp_cf` exactly (confirmed bit-for-bit locally on synthetic data,
+and numerically to ~1e-12 on the real 200-episode sample). A 3-point K-sweep (0.5×/1×/2× the
+calibrated `K = 0.2944`) confirms this: the ratio stays at 1.000000 at every K, because it is an
+algebraic identity being re-verified, not a genuinely free parameter being tested.
+
+**`hue_shortcut`'s "floor" has no equally clean single number, and none is reported here.** The same
+K-sweep applied to `K_hue` shows the ratio is extremely sensitive to a hyperparameter that has no
+physical anchor (unlike `true_cause_predict`'s pad radius, `K_hue`'s calibration target
+`target_prob=0.95` is a modeling choice, not a measurement):
+
+| K_hue (relative to calibrated) | Ratio-of-means | Per-episode mean ± std | surp_fact (mean) | surp_cf (mean) |
+|---|---|---|---|---|
+| 0.5× (K_hue=0.00659) | 16.87 | 16.87 ± 0.02 | 0.0348 | 0.587 |
+| 1.0× (K_hue=0.01319, calibrated) | 335.26 | 335.27 ± 0.94 | 0.00250 | 0.837 |
+| 2.0× (K_hue=0.02638) | 129,215.97 | 129,220.47 ± 766.40 | 0.0000076 | 0.983 |
+
+The ratio swings **~8,000×** across a 4× range in `K_hue` — going from 16.87 to 129,216 — while the
+absolute surprise values behind it move smoothly and stay well-behaved throughout: `surp_fact` shrinks
+toward zero as `K_hue` grows (0.0348 → 0.0025 → 0.0000076) while `surp_cf` stays bounded near its
+ceiling (0.587 → 0.837 → 0.983). **This is the same near-zero-denominator mechanism already
+documented in `sec:ratio-discrepancy` (Jensen's inequality: as the factual surprise shrinks toward
+zero, the ratio blows up even though nothing about the counterfactual surprise itself is changing) —
+reproduced here in a fully controlled setting where the blowup can be watched happening directly as
+`K_hue` increases and `surp_fact → 0`.** It is the same phenomenon already known to affect the
+per-episode mean-of-ratios numbers throughout Themes D/E/G, not a new problem introduced by this
+oracle.
+
+Per the reasoning behind this decision: reporting a single number (e.g. 335.26) for the hue-shortcut
+floor would be the least defensible figure in this entire report if pressed on where it came from —
+`target_prob=0.95` is not measured from anything, so a table entry citing "the" floor without its
+footnote invites exactly the citation-without-context failure this report has otherwise been careful
+to avoid. Instead: **the hue-shortcut floor is reported as a range (~17 to ~129,000 across the
+observed sweep, explicitly unanchored to any principled `K_hue`)**, with the absolute `surp_fact`/
+`surp_cf` values above serving as the stable, concrete quantities a reader can actually reason about.
+
+### Interpretation
+
+The ceiling (`true_cause`, ratio ≈ 1.0) is a mathematical guarantee about any predictor that
+literally cannot see the intervened factor — it establishes what "no shortcut reliance whatsoever"
+looks like on this exact metric, and every checkpoint's ratio in this report should be read relative
+to that anchor, not relative to 0. The floor is real in direction (a predictor that reads *only* the
+shortcut feature does produce ratios far above 1, confirming the metric responds to shortcut reliance
+the way it's supposed to) but its magnitude is not a number this report is prepared to defend as
+precise — only the qualitative fact that it is large and grows without bound as the predictor's
+confidence in the shortcut increases.
+
+### Caveats
+
+- CPU-only, local script — no GPU, no Modal run, no new HDF5 collection. Results are fully
+  reproducible from the existing `glitched_hue_tworoom_half.h5` dataset already on disk.
+- `teleport_enabled` is not stored as its own column in `glitched_hue_tworoom_half.h5` (only the
+  `teleported` outcome is present); the script falls back to `teleport_enabled = (hue == blue)`,
+  valid only because this dataset was built with that exact confound rule — not a general-purpose
+  substitution.
+- 2 of 200 sampled episodes were skipped for unreadable HDF5 chunks in the local dataset copy, a
+  pre-existing corruption issue also encountered in `research/causal_discovery.py`, unrelated to
+  anything in this script.
+- This calibrates the *metric*, not any specific checkpoint. It says nothing new about
+  `lewm_epoch_100` or any other trained model's actual behavior — it establishes what the numbers
+  in every other section of this report should be compared against.
+
+### Reproduce
+
+```
+source .venv/bin/activate
+export HDF5_PLUGIN_PATH=.venv/lib/python3.10/site-packages/hdf5plugin/plugins
+python3 research/oracle_calibration.py --n-episodes 200 --seed 42 --k-sweep
+```
+
+Results: `oracle_calibration_results.json` (written to the current working directory; not committed
+to git, regenerable directly from the command above in under a minute on CPU).
