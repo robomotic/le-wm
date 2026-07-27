@@ -986,6 +986,42 @@ artifact hypothesis via a second, independent line of evidence that doesn't depe
 translation at all: `ctx_cf_true` here is the literal real encoder output of the real paired
 counterfactual rollout, not `z + Δ_hue`.
 
+**This was originally incomplete: the ratio was the only metric cross-checked against ground truth.**
+The paper insists on three metrics before calling anything a verdict elsewhere in this report
+(surprise ratio, structural invariance error, AAP consistency advantage) — reporting only the ratio
+here was a gap. `theme_d_paired_validation.py` was extended to also compute a ground-truth SIE
+(reusing `pos_dirs`, already extracted by Stage 1 but previously unused): `sie_true = mean
+|pos_dirs·z_fact_anchor − pos_dirs·z_cf_true_anchor|`, the same formula `_multi_factor_invariance`
+uses, with the real counterfactual encoding in place of `z + Δ_hue`. AAP consistency advantage did
+**not** need a ground-truth version — verified directly in `_aap_consistency_advantage`'s code that
+it never constructs `z_cf` or touches `Δ_hue` at all (it only compares a factual context against a
+blind/mean-embedding prior), so the existing `causal_test` numbers for it are already trustworthy.
+
+| Condition | Metric | Translation-based | Ground-truth | Notes |
+|---|---|---|---|---|
+| Masked | Surprise ratio | 0.969 ± 0.036 | **0.916 ± 0.054** | both close to 1.0 |
+| Masked | SIE | 7.600 ± 0.0000017 | **0.310 ± 0.091** | see variance note below |
+| Masked | Consistency advantage | 0.086 | *(no ground-truth version needed)* | from `causal_test`, not `z_cf`-dependent |
+| Unmasked | Surprise ratio | 1.115 ± 0.333 | **1.604 ± 1.026** | both modest, no blowup |
+| Unmasked | SIE | 0.684 ± 0.0000004 | **0.447 ± 0.267** | see variance note below |
+| Unmasked | Consistency advantage | 1.519 | *(no ground-truth version needed)* | from `causal_test`, not `z_cf`-dependent |
+
+**A previously-unnoticed discovery, found while building this table, that applies retroactively to
+every "Structural invariance error X ± Y" reported anywhere in this document (Baseline, Option
+A/B/C/C+A, the SIGReg ablation, Theme G) — the reported std has always been ≈0 by mathematical
+construction, not because of genuine batch-to-batch consistency.** Since
+`z_cf = z + Δ_hue` with a single fixed `Δ_hue` per run, `_multi_factor_invariance`'s formula
+`mean|z·wᵀ − z_cf·wᵀ|` algebraically reduces to `|Δ_hue·wᵀ|` — a constant that cancels the
+per-sample `z` dependence entirely, regardless of which batch or episode it's evaluated on. Directly
+confirmed here: the translation-SIE std above is `1.6e-6` (masked) and `4.1e-7` (unmasked) —
+numerically zero, not "coincidentally small." This does not invalidate the SIE *point estimates*
+already reported throughout this report (`|Δ_hue·wᵀ|` is still a real, meaningful orthogonality
+measurement between the hue-shift and position-probe directions), but the "± std" attached to every
+one of them has never carried the information a reader would reasonably assume it does. The
+ground-truth SIE computed here (0.310 masked, 0.447 unmasked) is the first SIE number in this entire
+document with genuine, non-trivial variance, since `z_cf_true` is a real, independently-varying
+encoding per episode rather than a fixed offset.
+
 **One honest caveat on this table's own "Translation ratio" column**: `theme_d_paired_validation.py`
 hardcodes its `Δ_hue` probe-fitting to the *original* baseline dataset (`glitched_hue_tworoom_half`),
 not `glitched_hue_decorrelated` — a pre-existing design choice from when Theme D was built
@@ -998,17 +1034,24 @@ of the 154.85 figure. What *does* explain 154.85 is the on-manifold check above 
 entirely within `glitched_hue_decorrelated`, no cross-dataset mismatch), which independently showed
 `z_cf` sitting 10-65× off-manifold specifically for this checkpoint's own latent geometry.
 
-**Combined verdict: two independent, artifact-free measurements (the on-manifold check's
-distance-to-manifold diagnosis, and Theme D's real paired-rollout ratios) both point away from
-154.85 being a genuine property of the model.** The positive control's actual read, taken from the
-trustworthy ground-truth numbers: modest surprise ratios in both conditions (0.92, 1.60) — neither a
-dramatic shortcut signal nor a perfectly clean pass, but far closer to "no confound to latch onto"
-than the raw unmasked `causal_test` number suggested. The translation-based AAP surprise ratio,
-across this entire report, should be treated as unreliable specifically for checkpoints whose
-training data structurally differs from the checkpoint the metric was originally validated against
-(Theme C/D's on-manifold and ground-truth checks were themselves the mechanism that caught this,
-not an incidental afterthought — exactly the kind of cross-check this cycle has been building
-toward).
+**Combined verdict, now on the complete multi-metric picture: two independent, artifact-free
+measurements (the on-manifold check's distance-to-manifold diagnosis, and Theme D's real
+paired-rollout ratio + SIE) both point away from 154.85 being a genuine property of the model, and
+the ground-truth SIE reinforces the same conclusion.** Ground-truth SIE is low in both conditions
+(0.310 masked, 0.447 unmasked) — consistent with a model whose position encoding is not badly
+entangled with the real counterfactual, matching the modest ground-truth ratios (0.92, 1.60).
+Consistency advantage (1.519 unmasked, 0.086 masked, from `causal_test`, unaffected by the
+translation artifact since it never constructs `z_cf`) adds a third, independently-computed metric
+pointing the same direction — positive in both conditions, meaning factual evidence still reduces
+predictive uncertainty relative to a blind prior, as expected of a functioning (not collapsed) world
+model. Taken together, all three metrics — surprise ratio, SIE, and consistency advantage — support
+the same reading: this positive-control checkpoint shows no dramatic shortcut reliance, closer to
+"no confound to latch onto" than the raw unmasked `causal_test` ratio alone suggested. The
+translation-based AAP surprise ratio *and* SIE, across this entire report, should be treated as
+unreliable specifically for checkpoints whose training data structurally differs from the checkpoint
+the metric was originally validated against — and the SIE's reported "± std" in particular should
+never have been read as evidence of stability in the first place, for any condition in this document,
+given it is mathematically forced to ≈0 regardless of what the model actually does.
 
 ### Reproduce (cross-check)
 

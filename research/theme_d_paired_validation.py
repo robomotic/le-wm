@@ -199,6 +199,7 @@ def main():
     print("\n[3/4] Encoding paired windows and computing metrics ...")
     approx_err, approx_err_norm = [], []
     surp_fact, surp_cf_translation, surp_cf_true = [], [], []
+    sie_translation, sie_true = [], []
     delta_hue_norm = float(delta_hue.norm())
 
     bs = args.batch_size
@@ -223,6 +224,16 @@ def main():
             err = float((z_cf_translation - z_cf_true_anchor).norm())
             approx_err.append(err)
             approx_err_norm.append(err / (delta_hue_norm + 1e-8))
+
+            # Structural invariance error (position-probe projection), same formula
+            # as _multi_factor_invariance's "mean |z @ w.T - z_cf @ w.T|" -- but here
+            # z_cf_true is the REAL counterfactual encoding, not z_fact + delta_hue,
+            # so this is NOT subject to the off-manifold-translation concern that the
+            # translation-based SIE (reported by causal_test) is. pos_dirs has shape
+            # (2, D); mean over the 2 position dims gives one scalar per episode.
+            fact_proj = pos_dirs @ z_fact_anchor
+            sie_translation.append(float((fact_proj - pos_dirs @ z_cf_translation).abs().mean()))
+            sie_true.append(float((fact_proj - pos_dirs @ z_cf_true_anchor).abs().mean()))
 
             ctx = emb_fact[j, ctx_start:enc_idx].unsqueeze(0)
             act_ctx = act_emb_fact[j, ctx_start:enc_idx].unsqueeze(0)
@@ -275,6 +286,12 @@ def main():
         # are the primary evidence for whether the verdict actually changes.
         "ratio_crosses_one_translation": bool(np.mean(ratio_translation) >= 1.0),
         "ratio_crosses_one_true": bool(np.mean(ratio_true) >= 1.0),
+        # Structural invariance error: sie_translation uses the SAME z+delta_hue
+        # construction as causal_test's SIE (subject to the off-manifold concern
+        # metric (A) above tests for); sie_true uses the real counterfactual
+        # encoding instead, so it is NOT subject to that concern.
+        "sie_translation": _ratio_summ(sie_translation),
+        "sie_true": _ratio_summ(sie_true),
     }
 
     print("\n" + "=" * 66)
@@ -296,6 +313,11 @@ def main():
     print(f"    translation: {metrics['ratio_crosses_one_translation']}   real: {metrics['ratio_crosses_one_true']}")
     verdict_changed = metrics["ratio_crosses_one_translation"] != metrics["ratio_crosses_one_true"]
     print(f"  Boolean verdict changed by using the real counterfactual: {verdict_changed}")
+    st = metrics["sie_translation"]
+    su = metrics["sie_true"]
+    print(f"  Structural invariance error (position-probe projection):")
+    print(f"    translation ctx_cf:  {st['mean']:.4f} ± {st['std']:.4f}  (N={st['n']})")
+    print(f"    REAL ctx_cf_true:    {su['mean']:.4f} ± {su['std']:.4f}  (N={su['n']})")
     print("=" * 66)
 
     results_path = out_dir / f"theme_d_paired_results{suffix}.json"
