@@ -853,3 +853,117 @@ python research/causal_discovery.py --n-episodes 5000 --seed 42
 
 No Modal job, no GPU. Requires `causal-learn` (added to `pyproject.toml`). Results:
 `causal_discovery_results.json` in the working directory.
+
+## Theme G — Decorrelated-Confound Positive Control (2026-07-27)
+
+The biggest remaining conceptual gap: every prior result on this checkpoint lineage measures
+*failure* to disentangle a confound. A positive control asks the opposite question — give the
+model training data with **no confound to latch onto at all**, and check whether the same AAP
+battery reports a clean result. If it does, that's evidence the metric itself is sound and the
+failures documented throughout this report are a property of the confounded training data, not an
+artifact of the evaluation pipeline.
+
+### Pipeline
+
+`research/collect_decorrelated.py` reuses `collect_option_c.py`'s confound-override mechanism
+(`variation_values` setting `background.color` and `teleport.enabled` together) but draws both
+independently per chunk of 20 episodes, rather than Option C's deterministic reversed pairing. A
+local smoke test caught a real bug before the expensive full run: the initial draft copied
+`collect_option_c.py`'s use of `RandomPolicy` verbatim, which gives ~3× longer episodes than the
+actual training recipe (measured: mean `ep_len` ≈88 vs. `glitched_hue_tworoom_half`'s ≈32) —
+conflating "confound removed" with "action/behavior distribution also changed." Switched to
+`GlitchedHueExpertPolicy` matching `scripts/data/config/glitched_hue_half.yaml` exactly
+(`action_noise=0.5, action_repeat_prob=0.05`), confirmed via rerun to restore baseline-scale episode
+length (mean ≈22).
+
+Full collection: 20,000 episodes, 420,139 steps, seed 3072. Decorrelation confirmed on a held-out
+2,000-episode sample: **corr(hue, teleported) = 0.0425** (vs. training's near-perfect confound).
+Training: 100 epochs, identical hyperparameters to every other checkpoint in this report (ViT-Tiny,
+SIGReg λ=0.09, batch 64, AdamW lr=5e-5/wd=1e-3, bf16, history=3, 6-layer/16-head predictor).
+`validate/sigreg_loss ≈ 1.48` at completion — healthy, not collapsed (contrast with the SIGReg
+ablation's SIE in the hundreds).
+
+### Results — not the clean pass the plan anticipated
+
+| Condition | Surprise ratio (mean ± std, N=200) | Struct. inv. error | Pos R² |
+|---|---|---|---|
+| Unmasked | **154.85 ± 236.24** | 0.236 | 0.996 |
+| Masked (teleport patch) | 0.92 ± 0.11 | 0.598 | 0.921 |
+
+The unmasked ratio is an order of magnitude beyond anything else in this entire report (Baseline
+≈10, Option B ≈15, everything else single digits) — the opposite of "expected result if the
+pipeline is sound: ratio well below 1.0 in both conditions." The masked ratio, by contrast, lands
+almost exactly where the plan predicted.
+
+### Diagnosis: the translation-based `z_cf` is severely off-manifold for this checkpoint
+
+Before treating 154.85 as a finding about the model, `--extended-validation`'s on-manifold check
+(Theme C's machinery) was run against both conditions:
+
+| Condition | Mahalanobis: z_fact / z_cf / z_rand | kNN: z_fact / z_cf / z_rand |
+|---|---|---|
+| Unmasked | 57.66 / **587.51** / 2317.20 | 2.24 / 6.02 / 6.01 |
+| Masked | 22.44 / **1472.74** / 2440.16 | 0.20 / 2.18 / 2.18 |
+
+For comparison, the *original* confounded-training checkpoint's Theme C check found `z_cf` at
+~1.1× `z_fact` under Mahalanobis — clearly on-manifold. Here, `z_cf` sits **10×** (unmasked) to
+**65×** (masked) farther from the reference manifold than `z_fact`, and under kNN distance is
+statistically indistinguishable from a literally-random direction in *both* conditions (matching,
+but far exceeding in severity, Theme C's original "mixed" verdict on kNN).
+
+**Interpretation:** `z_cf = z_fact + Δ_hue` was never a fully trustworthy construction (Theme C
+already showed leakage; Theme D already showed the approximation error is large even for the
+original model). For *this* checkpoint specifically, it appears to have broken down far more
+severely. A plausible mechanism, offered as a hypothesis rather than a confirmed explanation: under
+the original confounded training data, hue and teleport-availability were perfectly correlated, so
+the model could (and evidently did) encode both along a single shared latent direction — meaning
+`Δ_hue`, estimated purely from a hue probe, incidentally captured a joint "hue-and-availability"
+shift that stayed roughly on-manifold. Under the decorrelated data, the model can no longer use a
+shared direction (the two factors vary independently), so it must encode them separately — and a
+translation along the now-hue-only direction no longer corresponds to any real, jointly-consistent
+data point. Note this hypothesis does *not* fully explain why the *masked* condition is even more
+off-manifold (65×) than *unmasked* (10×) yet reports a ratio far closer to 1.0 — off-manifold
+distance and downstream prediction error are evidently not simply monotonically related for this
+model, and no strong quantitative claim is made about that specific relationship here.
+
+**Bottom line: the raw surprise-ratio numbers above should not be read as a clean pass or fail for
+Theme G's positive-control question.** The pipeline itself worked exactly as intended (decorrelation
+confirmed, training healthy) — what broke down is the *evaluation metric's own validity* for this
+specific checkpoint, not evidence about the checkpoint's causal competence one way or the other.
+This is itself a genuine, reportable finding: the translation-based counterfactual construction used
+throughout Options A/B/C+A does not transfer cleanly across checkpoints trained under materially
+different data regimes, which is a real limitation of that construction as a general-purpose tool,
+independent of anything it says about this particular model.
+
+### Recommended next step (not yet run)
+
+`research/collect_theme_d_paired.py` / `theme_d_paired_validation.py` collect *real* paired
+factual/counterfactual rollouts directly from the environment and evaluate a given checkpoint
+against them — sidestepping the on-manifold question entirely, since no latent translation is
+involved. Both scripts already work against any checkpoint with zero modification; running them
+against this decorrelated checkpoint would give a trustworthy, ground-truth read on whether it
+actually shows reduced hue-reliance, resolving what the AAP metric alone cannot answer here.
+
+### Caveats
+
+- **Single seed (3072).** The plan explicitly called for starting with one seed before committing to
+  a 3-seed extension; given the AAP-metric validity concern above, a 3-seed extension of *this*
+  metric would not obviously resolve anything until the Theme D cross-check is run first.
+- **This is the single most expensive item in the review cycle** (full 20k-episode collection +
+  100-epoch training, ~run overnight). The infrastructure (script, Hydra config, Modal wiring) is
+  reusable for any future seed or re-run without further engineering.
+
+### Reproduce
+
+```
+modal run modaldotcom/app.py --do-collect-decorrelated --decorrelated-seed 3072
+modal run --detach modaldotcom/app.py::train --data glitched_hue_decorrelated --max-epochs 100 --seed 3072 --no-wandb-enabled
+modal run modaldotcom/app.py --do-causal-test --policy <new_ckpt> --dataset-name glitched_hue_decorrelated
+modal run modaldotcom/app.py --do-causal-test --policy <new_ckpt> --dataset-name glitched_hue_decorrelated --mask-causal-test
+modal run modaldotcom/app.py --do-causal-test --policy <new_ckpt> --dataset-name glitched_hue_decorrelated --extended-validation
+modal run modaldotcom/app.py --do-causal-test --policy <new_ckpt> --dataset-name glitched_hue_decorrelated --mask-causal-test --extended-validation
+```
+
+Checkpoint used: `ts_1785091494_1a91d8/lewm_epoch_100`. Results: `causal_test_glitched_hue_decorrelated_results.json`,
+`causal_test_masked_glitched_hue_decorrelated_results.json` (each with on-manifold data when run with
+`--extended-validation`) on the `swm-cache` volume alongside the checkpoint.
