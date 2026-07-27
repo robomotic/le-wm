@@ -967,3 +967,56 @@ modal run modaldotcom/app.py --do-causal-test --policy <new_ckpt> --dataset-name
 Checkpoint used: `ts_1785091494_1a91d8/lewm_epoch_100`. Results: `causal_test_glitched_hue_decorrelated_results.json`,
 `causal_test_masked_glitched_hue_decorrelated_results.json` (each with on-manifold data when run with
 `--extended-validation`) on the `swm-cache` volume alongside the checkpoint.
+
+### Resolution — Theme D ground-truth cross-check confirms the artifact hypothesis
+
+Ran `theme_d_paired_validation.py` directly against `ts_1785091494_1a91d8/lewm_epoch_100`, reusing
+the *existing* Theme D paired dataset (`glitched_hue_theme_d_fact.h5`/`_cf.h5`, 200 episodes, seed
+42) with zero modification — the paired rollouts are generated from the environment directly and
+are not tied to any specific checkpoint's training data, so no recollection was needed.
+
+| Condition | Translation ratio | REAL ground-truth ratio | Approx. error (normalized) |
+|---|---|---|---|
+| Masked | 0.969 ± 0.036 | **0.916 ± 0.054** | 1.83× |
+| Unmasked | 1.115 ± 0.333 | **1.604 ± 1.026** | 4.36× |
+
+**The real ground-truth ratios (0.92 masked, 1.60 unmasked) are modest in both conditions** — nothing
+resembling the 154.85 the translation-based `causal_test` AAP cycle reported. This confirms the
+artifact hypothesis via a second, independent line of evidence that doesn't depend on any linear
+translation at all: `ctx_cf_true` here is the literal real encoder output of the real paired
+counterfactual rollout, not `z + Δ_hue`.
+
+**One honest caveat on this table's own "Translation ratio" column**: `theme_d_paired_validation.py`
+hardcodes its `Δ_hue` probe-fitting to the *original* baseline dataset (`glitched_hue_tworoom_half`),
+not `glitched_hue_decorrelated` — a pre-existing design choice from when Theme D was built
+exclusively for the original checkpoint, not parameterized for arbitrary datasets. This table's
+"Translation ratio" is therefore a *different* `Δ_hue` estimate than the one `causal_test`'s own AAP
+cycle used to produce 154.85 (which fit probes on `glitched_hue_decorrelated` itself, matching the
+checkpoint's actual training distribution) — the two "translation" numbers are not directly
+comparable, and this table's translation column should not be read as a replication or explanation
+of the 154.85 figure. What *does* explain 154.85 is the on-manifold check above (fit and evaluated
+entirely within `glitched_hue_decorrelated`, no cross-dataset mismatch), which independently showed
+`z_cf` sitting 10-65× off-manifold specifically for this checkpoint's own latent geometry.
+
+**Combined verdict: two independent, artifact-free measurements (the on-manifold check's
+distance-to-manifold diagnosis, and Theme D's real paired-rollout ratios) both point away from
+154.85 being a genuine property of the model.** The positive control's actual read, taken from the
+trustworthy ground-truth numbers: modest surprise ratios in both conditions (0.92, 1.60) — neither a
+dramatic shortcut signal nor a perfectly clean pass, but far closer to "no confound to latch onto"
+than the raw unmasked `causal_test` number suggested. The translation-based AAP surprise ratio,
+across this entire report, should be treated as unreliable specifically for checkpoints whose
+training data structurally differs from the checkpoint the metric was originally validated against
+(Theme C/D's on-manifold and ground-truth checks were themselves the mechanism that caught this,
+not an incidental afterthought — exactly the kind of cross-check this cycle has been building
+toward).
+
+### Reproduce (cross-check)
+
+```
+modal run modaldotcom/app.py --do-theme-d-validate --policy ts_1785091494_1a91d8/lewm_epoch_100 --mask-theme-d
+modal run modaldotcom/app.py --do-theme-d-validate --policy ts_1785091494_1a91d8/lewm_epoch_100
+```
+
+No new data collection — reuses the existing `glitched_hue_theme_d_fact.h5`/`_cf.h5` paired dataset.
+Results: `theme_d_paired_results_masked.json`, `theme_d_paired_results.json` in
+`ts_1785091494_1a91d8/` on the `swm-cache` volume.
